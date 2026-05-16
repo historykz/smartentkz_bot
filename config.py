@@ -1,4 +1,4 @@
-
+"""
 Конфигурация бота.
 Все настройки бота централизованы здесь.
 Чувствительные данные (BOT_TOKEN) загружаются из переменных окружения или .env файла.
@@ -24,10 +24,6 @@ ADMIN_IDS: list[int] = [
 
 # Username менеджера (без @) для платных тестов и поддержки
 MANAGER_USERNAME: str = os.getenv("MANAGER_USERNAME", "historyentk_bot")
-
-# Канал обязательной подписки (с @ или без; пустая строка = выключено).
-# По умолчанию — @historykazakhkz. Можно переопределить через Railway Variables.
-REQUIRED_CHANNEL: str = os.getenv("REQUIRED_CHANNEL", "@historykazakhkz").strip()
 
 # === База данных ===
 BASE_DIR = Path(__file__).resolve().parent
