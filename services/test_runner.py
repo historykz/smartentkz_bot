@@ -529,6 +529,39 @@ async def finalize_attempt(bot: Bot, attempt_id: int, chat_id: int,
         (status, now_iso(), score, attempt_id),
     )
 
+    # === Сохраняем в test_statistics для лидерборда ===
+    try:
+        from services import group_quiz_service as _gqs
+        user_row = db.fetchone("SELECT tg_id, username, first_name, last_name FROM users WHERE id=?",
+                                (attempt['user_id'],))
+        if user_row and (correct + wrong + skipped) > 0:
+            full_name = " ".join(filter(None, [user_row.get('first_name'), user_row.get('last_name')])) or "Игрок"
+            # Длительность в секундах
+            duration_sec = 0
+            if attempt.get('start_time'):
+                try:
+                    from datetime import datetime as _dt
+                    st = _dt.fromisoformat(attempt['start_time'])
+                    duration_sec = int((_dt.utcnow() - st).total_seconds())
+                except Exception:
+                    pass
+            _gqs.save_private_attempt_to_statistics(
+                test_id=test['id'],
+                user_id=attempt['user_id'],
+                tg_id=user_row['tg_id'],
+                username=user_row.get('username') or "",
+                full_name=full_name,
+                correct=correct,
+                wrong=wrong,
+                skipped=skipped,
+                total_questions=total,
+                total_time_seconds=duration_sec,
+                started_at=attempt.get('start_time') or now_iso(),
+                finished_at=now_iso(),
+            )
+    except Exception as e:
+        logger.warning("Не удалось сохранить в test_statistics: %s", e)
+
     lang = attempt["language"] or "ru"
 
     # Слабые темы
