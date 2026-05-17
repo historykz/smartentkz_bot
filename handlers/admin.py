@@ -956,18 +956,62 @@ async def s_premium_days(message: Message, state: FSMContext, user: dict):
     utils.grant_premium(uid, days, message.from_user.id)
     await state.clear()
 
-    # Показываем итог
+    # Информация для админа
     info = utils.get_premium_info(uid)
-    target = db.fetchone("SELECT tg_id, username FROM users WHERE id=?", (uid,))
+    target = db.fetchone("SELECT tg_id, username, language FROM users WHERE id=?", (uid,))
     uname = ("@" + target['username']) if target and target['username'] else f"id{target['tg_id'] if target else '?'}"
     if days == 0:
         result_text = f"✅ <b>{uname}</b> получил <b>бессрочный</b> Premium."
+        until_str = "бессрочно"
     else:
         exp = info.get('expires_at') if info else None
+        until_str = exp[:10] if exp else "—"
         result_text = (f"✅ <b>{uname}</b> получил Premium на <b>{days} дн.</b>\n"
-                       f"📅 Действует до: <b>{exp[:10] if exp else '—'}</b>")
+                       f"📅 Действует до: <b>{until_str}</b>")
     await message.answer(result_text, parse_mode="HTML",
                          reply_markup=admin_menu_kb(lang))
+
+    # ── Уведомление самому пользователю + список платных тестов ──
+    if target and target.get('tg_id'):
+        try:
+            user_lang = target.get('language') or 'ru'
+            paid_tests = db.fetchall(
+                "SELECT id, title, subject, time_per_question FROM tests "
+                "WHERE is_paid=1 AND status='active' AND language=? ORDER BY id DESC LIMIT 20",
+                (user_lang,))
+
+            congrats = (
+                "🎉 <b>Поздравляем! Вы приобрели Premium!</b>\n\n"
+                f"💎 Срок действия: <b>{'бессрочно' if days==0 else f'{days} дн. (до {until_str})'}</b>\n\n"
+                "Теперь вам доступны:\n"
+                "✅ Все платные тесты\n"
+                "✅ Все разделы и материалы\n"
+                "✅ Quiz-формат и таймер как на настоящем экзамене\n"
+                "✅ Новые тесты сразу после добавления\n\n"
+            )
+
+            if paid_tests:
+                congrats += "🔓 <b>Доступные платные тесты:</b>\nВыберите тест ниже, чтобы начать.\n"
+                from aiogram.utils.keyboard import InlineKeyboardBuilder
+                kb = InlineKeyboardBuilder()
+                for tst in paid_tests:
+                    label = f"💎 {tst['title'][:50]}"
+                    kb.button(text=label, callback_data=f"opentest:{tst['id']}")
+                kb.button(text="📚 Каталог тестов", callback_data="m:tests")
+                kb.adjust(1)
+                await message.bot.send_message(
+                    target['tg_id'], congrats,
+                    reply_markup=kb.as_markup(), parse_mode="HTML")
+            else:
+                congrats += "📚 Откройте каталог тестов, чтобы начать."
+                from aiogram.utils.keyboard import InlineKeyboardBuilder
+                kb = InlineKeyboardBuilder()
+                kb.button(text="📚 Открыть каталог", callback_data="m:tests")
+                await message.bot.send_message(
+                    target['tg_id'], congrats,
+                    reply_markup=kb.as_markup(), parse_mode="HTML")
+        except Exception as e:
+            await message.answer(f"⚠️ Premium выдан, но уведомление не дошло: {e}")
 
 
 # =================================
@@ -1250,6 +1294,23 @@ async def cb_stats(call: CallbackQuery, user: dict):
 
 @router.callback_query(F.data == "adm:export", IsAdmin())
 async def cb_export(call: CallbackQuery, user: dict):
+    """Меню экспорта."""
+    lang = user.get('language') or 'ru'
+    from aiogram.utils.keyboard import InlineKeyboardBuilder
+    kb = InlineKeyboardBuilder()
+    kb.button(text="👥 Список пользователей", callback_data="adm:export:users")
+    kb.button(text="📊 Результаты тестов", callback_data="adm:export:results")
+    kb.button(text="↩️ Назад", callback_data="adm:menu")
+    kb.adjust(1)
+    await call.message.answer(
+        "📤 <b>Экспорт данных</b>\n\nВыберите тип:",
+        reply_markup=kb.as_markup(), parse_mode="HTML")
+    await call.answer()
+
+
+@router.callback_query(F.data == "adm:export:users", IsAdmin())
+async def cb_export_users(call: CallbackQuery, user: dict):
+    """Экспорт пользователей."""
     lang = user.get('language') or 'ru'
     rows = db.fetchall("""
         SELECT u.tg_id, u.username, u.first_name, u.language, u.school, u.city,
@@ -1270,7 +1331,110 @@ async def cb_export(call: CallbackQuery, user: dict):
                     r['language'], r['school'] or '', r['city'] or '',
                     r['current_streak'], r['best_streak'],
                     r['attempts'], r['total_score']])
-    data = buf.getvalue().encode('utf-8')
+    data = buf.getvalue().encode('utf-8-sig')  # BOM для корректной открытия в Excel
     file = BufferedInputFile(data, filename="users.csv")
-    await call.message.answer_document(file, caption=t("export_caption", lang))
+    await call.message.answer_document(file, caption=f"👥 Экспорт пользователей: {len(rows)} строк")
+    await call.answer()
+
+
+@router.callback_query(F.data == "adm:export:results", IsAdmin())
+async def cb_export_results(call: CallbackQuery, user: dict):
+    """
+    Экспорт результатов тестов: ник, tg_id, тест, балл, правильные, неправильные,
+    пропущенные, проценты, длительность, начало, конец.
+    """
+    rows = db.fetchall("""
+        SELECT
+            a.id AS attempt_id,
+            u.tg_id,
+            u.username,
+            u.first_name,
+            u.school,
+            t.id AS test_id,
+            t.title AS test_title,
+            t.subject,
+            t.language AS test_lang,
+            t.is_paid,
+            a.start_time,
+            a.end_time,
+            a.score,
+            a.correct_answers,
+            a.wrong_answers,
+            a.skipped_answers,
+            a.status,
+            a.is_counted
+        FROM test_attempts a
+        JOIN users u ON u.id = a.user_id
+        JOIN tests t ON t.id = a.test_id
+        WHERE a.status IN ('finished', 'aborted')
+        ORDER BY a.start_time DESC
+        LIMIT 5000
+    """)
+    if not rows:
+        await call.answer("Нет данных для экспорта", show_alert=True)
+        return
+
+    buf = io.StringIO()
+    w = csv.writer(buf, delimiter=';')  # ; для русского Excel
+    w.writerow([
+        'attempt_id', 'tg_id', 'username', 'first_name', 'school',
+        'test_id', 'test_title', 'subject', 'language', 'is_paid',
+        'start_time', 'end_time', 'duration_seconds',
+        'score', 'correct', 'wrong', 'skipped', 'total_questions',
+        'percent', 'status', 'is_counted',
+    ])
+
+    from datetime import datetime as _dt
+
+    for r in rows:
+        # Длительность в секундах
+        duration = ""
+        if r['start_time'] and r['end_time']:
+            try:
+                st = _dt.fromisoformat(r['start_time'])
+                en = _dt.fromisoformat(r['end_time'])
+                duration = int((en - st).total_seconds())
+            except Exception:
+                duration = ""
+        correct = r['correct_answers'] or 0
+        wrong = r['wrong_answers'] or 0
+        skipped = r['skipped_answers'] or 0
+        total = correct + wrong + skipped
+        percent = round(correct * 100 / total, 1) if total > 0 else 0
+
+        w.writerow([
+            r['attempt_id'],
+            r['tg_id'],
+            r['username'] or '',
+            r['first_name'] or '',
+            r['school'] or '',
+            r['test_id'],
+            r['test_title'] or '',
+            r['subject'] or '',
+            r['test_lang'] or '',
+            'да' if r['is_paid'] else 'нет',
+            r['start_time'] or '',
+            r['end_time'] or '',
+            duration,
+            r['score'] or 0,
+            correct,
+            wrong,
+            skipped,
+            total,
+            percent,
+            r['status'] or '',
+            'да' if r['is_counted'] else 'нет',
+        ])
+
+    data = buf.getvalue().encode('utf-8-sig')  # BOM для Excel
+    file = BufferedInputFile(data, filename="test_results.csv")
+    await call.message.answer_document(
+        file,
+        caption=(
+            f"📊 <b>Результаты тестов</b>\n"
+            f"Всего записей: <b>{len(rows)}</b>\n\n"
+            f"Колонки: ник, tg_id, школа, тест, балл, %, правильные/неправильные/пропущенные, "
+            f"длительность, время начала/конца."
+        ),
+        parse_mode="HTML")
     await call.answer()
