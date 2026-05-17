@@ -12,7 +12,7 @@ import utils
 from locales import t
 from keyboards import (tests_list_kb, test_card_kb, paid_test_kb, subscription_kb,
                        back_kb, main_menu_kb)
-from services import test_runner, subscription_service, share_service
+from services import test_runner, subscription_service, share_service, group_quiz_service
 
 router = Router(name="user")
 log = logging.getLogger(__name__)
@@ -105,7 +105,9 @@ async def show_test_card(bot: Bot, chat_id: int, user_tg_id: int, test_id: int, 
             return
 
     # Бесплатный или есть доступ — QuizBot-style карточка
-    card_text, card_kb = share_service.build_test_card(dict(test), in_bot=True)
+    is_admin = utils.is_admin(user_tg_id)
+    card_text, card_kb = share_service.build_test_card(
+        dict(test), in_bot=True, viewer_is_admin=is_admin)
     await bot.send_message(chat_id, card_text, reply_markup=card_kb,
                             parse_mode="HTML", disable_web_page_preview=True)
 
@@ -148,6 +150,20 @@ async def cb_check_access(call: CallbackQuery, user: dict):
                              test_id, lang)
     else:
         await call.answer(t("access_still_none", lang), show_alert=True)
+
+
+@router.callback_query(F.data.startswith("opentest:"))
+async def cb_open_test(call: CallbackQuery, user: dict):
+    """Открыть карточку теста по ID — используется в уведомлениях о Premium и т.п."""
+    lang = _resolve_lang(user)
+    try:
+        test_id = int(call.data.split(":")[1])
+    except (ValueError, IndexError):
+        await call.answer()
+        return
+    await show_test_card(call.bot, call.message.chat.id,
+                          call.from_user.id, test_id, lang)
+    await call.answer()
 
 
 @router.callback_query(F.data.startswith("run:"))
@@ -353,4 +369,42 @@ async def cb_my_results(call: CallbackQuery, user: dict):
         await call.message.edit_text(text, reply_markup=back_kb(lang, "m:menu"))
     except Exception:
         await call.message.answer(text, reply_markup=back_kb(lang, "m:menu"))
+    await call.answer()
+
+
+# ============ Статистика теста (лидерборд с пагинацией) ============
+
+@router.callback_query(F.data.startswith("stats:"))
+async def cb_stats(call: CallbackQuery, user: dict):
+    """Показать страницу лидерборда теста. Только админ/автор."""
+    try:
+        parts = call.data.split(":")
+        test_id = int(parts[1])
+        page = int(parts[2]) if len(parts) > 2 else 1
+    except (ValueError, IndexError):
+        await call.answer()
+        return
+
+    test = test_runner.get_test(test_id)
+    if not test:
+        await call.answer("Тест не найден.", show_alert=True)
+        return
+
+    # Доступ: админ бота или автор теста
+    is_admin = utils.is_admin(call.from_user.id)
+    is_author = bool(user) and test.get('created_by') == user['id']
+    if not (is_admin or is_author):
+        await call.answer(
+            "❌ У вас нет доступа к статистике этого теста.",
+            show_alert=True)
+        return
+
+    text, kb = group_quiz_service.build_stats_text(dict(test), page=page)
+    try:
+        await call.message.edit_text(text, reply_markup=kb, parse_mode="HTML",
+                                       disable_web_page_preview=True)
+    except Exception:
+        # Если редактирование не получилось (старое сообщение и т.п.) — отправим новое
+        await call.message.answer(text, reply_markup=kb, parse_mode="HTML",
+                                    disable_web_page_preview=True)
     await call.answer()
