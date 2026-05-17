@@ -55,7 +55,8 @@ def _author_label(test: dict) -> str:
 
 
 def build_test_card(test: dict, bot_username: str = None,
-                     in_bot: bool = False) -> tuple[str, InlineKeyboardMarkup]:
+                     in_bot: bool = False,
+                     viewer_is_admin: bool = False) -> tuple[str, InlineKeyboardMarkup]:
     """
     Возвращает (text, inline_keyboard) в стиле @QuizBot.
 
@@ -63,6 +64,7 @@ def build_test_card(test: dict, bot_username: str = None,
                    Кнопка «Пройти тест» — обычный callback run:{id}.
     in_bot=False — карточка для шеринга в чужие чаты.
                    Кнопка «Пройти тест» — deep-link, открывающий бот.
+    viewer_is_admin — показать админ-кнопки: Отправить в группу, Редактировать, Статистика.
     """
     bu = bot_username or config.BOT_USERNAME or "bot"
     test_id = test["id"]
@@ -92,19 +94,27 @@ def build_test_card(test: dict, bot_username: str = None,
     if in_bot:
         # В личке у юзера — callback (без deep-link через t.me)
         rows.append([InlineKeyboardButton(
-            text="✅ Пройти тест", callback_data=f"run:{test_id}")])
+            text="▶️ Пройти тест", callback_data=f"run:{test_id}")])
     else:
         rows.append([InlineKeyboardButton(
-            text="✅ Пройти тест", url=deep_link)])
+            text="▶️ Пройти тест", url=deep_link)])
 
-    rows.append([InlineKeyboardButton(
-        text="📤 Отправить в группу",
-        switch_inline_query=f"test:{test_id}",
-    )])
     rows.append([InlineKeyboardButton(
         text="🔗 Поделиться",
         switch_inline_query=f"test:{test_id}",
     )])
+
+    # Админ-кнопки (только в личке)
+    if in_bot and viewer_is_admin:
+        rows.append([InlineKeyboardButton(
+            text="📤 Отправить в группу",
+            callback_data=f"groupsend:{test_id}",
+        )])
+        rows.append([InlineKeyboardButton(
+            text="📊 Статистика",
+            callback_data=f"stats:{test_id}:1",
+        )])
+
     if in_bot:
         rows.append([InlineKeyboardButton(
             text="↩️ Назад", callback_data="m:tests")])
