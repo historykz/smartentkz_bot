@@ -128,12 +128,14 @@ def grant_premium(user_id: int, days: int, admin_tg_id: int) -> None:
     existing = db.fetchone("SELECT id FROM premium_users WHERE user_id=?", (user_id,))
     if existing:
         db.execute(
-            "UPDATE premium_users SET expires_at=?, granted_at=?, granted_by_admin=? WHERE user_id=?",
+            "UPDATE premium_users SET expires_at=?, granted_at=?, granted_by_admin=?, "
+            "notified_expired=0 WHERE user_id=?",
             (expires, now_iso(), admin_tg_id, user_id),
         )
     else:
         db.execute(
-            "INSERT INTO premium_users (user_id, expires_at, granted_by_admin) VALUES (?,?,?)",
+            "INSERT INTO premium_users (user_id, expires_at, granted_by_admin, notified_expired) "
+            "VALUES (?,?,?,0)",
             (user_id, expires, admin_tg_id),
         )
 
