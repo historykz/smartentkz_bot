@@ -149,6 +149,8 @@ def options_kb(attempt_id: int, question_id: int, options: list[dict]) -> Inline
             text=f"{chr(ord('A') + i)}) {opt['text'][:60]}",
             callback_data=f"ans:{attempt_id}:{question_id}:{opt['id']}",
         )
+    # Кнопка СТОП — отдельной строкой
+    kb.button(text="🛑 СТОП", callback_data=f"abort:{attempt_id}")
     kb.adjust(1)
     return kb.as_markup()
 
