@@ -218,11 +218,18 @@ async def send_current_question(bot: Bot, attempt_id: int, chat_id: int) -> None
 
     use_poll = _can_use_quiz_poll(poll_question, options)
 
+    # Кнопка «🛑 СТОП» для прерывания — показывается с каждым заголовком вопроса
+    from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
+    stop_kb = InlineKeyboardMarkup(inline_keyboard=[[
+        InlineKeyboardButton(text="🛑 СТОП", callback_data=f"abort:{attempt_id}")
+    ]])
+
     msg = None
     try:
         if use_poll:
-            # Шлём заголовок
-            await bot.send_message(chat_id=chat_id, text=prefix, parse_mode="HTML")
+            # Шлём заголовок С КНОПКОЙ СТОП
+            await bot.send_message(chat_id=chat_id, text=prefix,
+                                    parse_mode="HTML", reply_markup=stop_kb)
             # Картинка, если есть
             if q.get("image_file_id"):
                 try:
