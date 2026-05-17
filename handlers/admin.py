@@ -490,21 +490,42 @@ async def cb_import_poll_root(call: CallbackQuery, user: dict):
     await call.answer()
 
 
-@router.message(PollImportStates.waiting_polls, F.poll, IsAdmin())
+@router.message(PollImportStates.waiting_polls, IsAdmin())
 async def msg_import_poll(message: Message, state: FSMContext, user: dict):
-    """Буферизуем входящие Quiz Polls — без немедленной записи."""
+    """Принимаем любые сообщения в этом state и проверяем poll внутри —
+    так ловим пересылки из ВСЕХ типов чатов (личка, каналы, группы)."""
     lang = user.get('language') or 'ru'
     data = await state.get_data()
     tid = data.get('import_poll_test_id')
     if not tid:
         await state.clear()
         return
-    if not quiz_importer.is_quiz_poll(message.poll):
-        await message.answer(t("poll_not_quiz", lang))
+
+    # Если не poll — подсказка
+    if message.poll is None:
+        cnt = len(data.get('poll_buffer') or [])
+        await message.answer(
+            f"📥 В буфере: <b>{cnt}</b> опросов.\n\n"
+            f"Пересылайте сюда Quiz Poll из любого чата или канала. "
+            f"Когда закончите — нажмите «✅ Сохранить».",
+            reply_markup=import_done_kb(lang)
+        )
         return
-    buf = data.get('poll_buffer') or []
-    # Сериализуем poll в dict — Poll объект не сохраняется в FSM
+
     poll = message.poll
+    # Принимаем ВСЕ типы polls (quiz/regular) — Telegram при пересылке
+    # часто меняет тип на 'regular' и не передаёт правильный ответ.
+    # Такие вопросы пойдут в 📋 Черновики на ручную проверку.
+
+    buf = data.get('poll_buffer') or []
+    # Защита от случайных дубликатов
+    if any(p.get('id') == poll.id for p in buf):
+        await message.answer(
+            f"⚠️ Этот опрос уже в буфере. Всего: <b>{len(buf)}</b>",
+            reply_markup=import_done_kb(lang)
+        )
+        return
+
     buf.append({
         'id': poll.id,
         'question': poll.question,
@@ -513,13 +534,16 @@ async def msg_import_poll(message: Message, state: FSMContext, user: dict):
         'explanation': getattr(poll, 'explanation', None) or "",
     })
     await state.update_data(poll_buffer=buf)
-    # Подтверждение только если у poll нет дублирования с предыдущим (для скорости — почти не шлём)
-    if len(buf) % 5 == 0:
-        await message.answer(
-            f"📥 В буфере: <b>{len(buf)}</b> опросов.\n"
-            f"Шлите ещё или нажмите «✅ Сохранить».",
-            reply_markup=import_done_kb(lang)
-        )
+
+    indicator = ""
+    if poll.correct_option_id is None:
+        indicator = " ⚠️ (правильный ответ не виден — пойдёт в черновики)"
+
+    await message.answer(
+        f"📥 В буфере: <b>{len(buf)}</b> опросов{indicator}.\n"
+        f"Шлите ещё или нажмите «✅ Сохранить».",
+        reply_markup=import_done_kb(lang)
+    )
 
 
 @router.callback_query(F.data == "import:done", PollImportStates.waiting_polls, IsAdmin())
@@ -558,20 +582,6 @@ async def cb_import_poll_done(call: CallbackQuery, state: FSMContext, user: dict
     await state.clear()
     await call.message.answer(t("admin_menu", lang), reply_markup=admin_menu_kb(lang))
     await call.answer()
-
-
-# Также принимаем forward-сообщения с poll
-@router.message(PollImportStates.waiting_polls, IsAdmin())
-async def msg_import_poll_text(message: Message, state: FSMContext, user: dict):
-    lang = user.get('language') or 'ru'
-    if message.text and not message.poll:
-        data = await state.get_data()
-        cnt = len(data.get('poll_buffer') or [])
-        await message.answer(
-            f"В буфере {cnt} опросов. Шлите Quiz Poll форвардом, "
-            f"или нажмите «✅ Сохранить».",
-            reply_markup=import_done_kb(lang)
-        )
 
 
 # =================================
@@ -735,22 +745,203 @@ async def s_grant_test(message: Message, state: FSMContext, user: dict):
 
 @router.callback_query(F.data == "adm:premium", IsAdmin())
 async def cb_premium(call: CallbackQuery, state: FSMContext, user: dict):
+    """Меню Premium-управления."""
+    lang = user.get('language') or 'ru'
+    from aiogram.utils.keyboard import InlineKeyboardBuilder
+    kb = InlineKeyboardBuilder()
+    kb.button(text="➕ Выдать Premium", callback_data="adm:premium:grant")
+    kb.button(text="📋 Список Premium", callback_data="adm:premium:list")
+    kb.button(text="🗑 Удалить Premium", callback_data="adm:premium:revoke")
+    kb.button(text="↩️ Назад", callback_data="adm:menu")
+    kb.adjust(1)
+    await call.message.answer(
+        "👑 <b>Управление Premium</b>\n\nВыберите действие:",
+        reply_markup=kb.as_markup(),
+    )
+    await call.answer()
+
+
+@router.callback_query(F.data == "adm:premium:grant", IsAdmin())
+async def cb_premium_grant(call: CallbackQuery, state: FSMContext, user: dict):
+    """Начало выдачи Premium."""
     lang = user.get('language') or 'ru'
     await state.set_state(PremiumStates.waiting_user)
     await call.message.answer(t("premium_ask_user", lang), reply_markup=cancel_kb(lang))
     await call.answer()
 
 
+@router.callback_query(F.data == "adm:premium:list", IsAdmin())
+async def cb_premium_list(call: CallbackQuery, user: dict):
+    """Список всех Premium-пользователей."""
+    from datetime import datetime
+    rows = db.fetchall("""
+        SELECT p.user_id, p.granted_at, p.expires_at, p.granted_by_admin,
+               u.tg_id, u.username, u.first_name
+        FROM premium_users p
+        JOIN users u ON u.id = p.user_id
+        ORDER BY p.granted_at DESC
+        LIMIT 100
+    """)
+    if not rows:
+        await call.message.answer(
+            "📋 Сейчас нет активных Premium-пользователей.",
+            reply_markup=admin_menu_kb(user.get('language') or 'ru'))
+        await call.answer()
+        return
+
+    now = datetime.utcnow()
+    active_lines = []
+    expired_lines = []
+    for r in rows:
+        uname = ("@" + r['username']) if r['username'] else (r['first_name'] or f"id{r['tg_id']}")
+        granted = (r['granted_at'] or "")[:10]
+        exp = r['expires_at']
+
+        # Статус и оставшиеся дни
+        if not exp:
+            status = "♾ бессрочно"
+            days_left_str = "—"
+            is_active = True
+        else:
+            try:
+                exp_dt = datetime.fromisoformat(exp)
+                if exp_dt > now:
+                    days_left = (exp_dt - now).days
+                    hours_left = ((exp_dt - now).seconds // 3600)
+                    if days_left > 0:
+                        days_left_str = f"{days_left} дн."
+                    else:
+                        days_left_str = f"{hours_left} ч."
+                    status = f"✅ до {exp[:10]}"
+                    is_active = True
+                else:
+                    status = f"❌ истёк {exp[:10]}"
+                    days_left_str = "—"
+                    is_active = False
+            except Exception:
+                status = "?"
+                days_left_str = "?"
+                is_active = False
+
+        # Сколько дней УЖЕ прошло с момента выдачи
+        try:
+            granted_dt = datetime.fromisoformat(r['granted_at'])
+            days_passed = (now - granted_dt).days
+            passed_str = f"{days_passed} дн. назад"
+        except Exception:
+            passed_str = "—"
+
+        line = (f"<b>{uname}</b>  (tg_id: <code>{r['tg_id']}</code>)\n"
+                f"  📅 Выдано: {granted} ({passed_str})\n"
+                f"  ⏳ Осталось: {days_left_str}\n"
+                f"  📌 Статус: {status}")
+        if is_active:
+            active_lines.append(line)
+        else:
+            expired_lines.append(line)
+
+    parts = []
+    if active_lines:
+        parts.append(f"✅ <b>Активные ({len(active_lines)}):</b>\n\n" + "\n\n".join(active_lines))
+    if expired_lines:
+        parts.append(f"\n❌ <b>Истёкшие ({len(expired_lines)}):</b>\n\n" + "\n\n".join(expired_lines))
+
+    # Делим на куски по ~3500 симв, чтобы Telegram не ругался
+    full = "\n\n".join(parts) if parts else "Пусто."
+    chunks = []
+    cur = ""
+    for line in full.split("\n\n"):
+        if len(cur) + len(line) + 2 > 3500:
+            chunks.append(cur)
+            cur = line
+        else:
+            cur = (cur + "\n\n" + line) if cur else line
+    if cur:
+        chunks.append(cur)
+
+    for chunk in chunks:
+        await call.message.answer(chunk, parse_mode="HTML")
+
+    await call.message.answer(
+        f"Всего: <b>{len(rows)}</b> | активных: <b>{len(active_lines)}</b> | "
+        f"истёкших: <b>{len(expired_lines)}</b>",
+        reply_markup=admin_menu_kb(user.get('language') or 'ru'),
+    )
+    await call.answer()
+
+
+@router.callback_query(F.data == "adm:premium:revoke", IsAdmin())
+async def cb_premium_revoke(call: CallbackQuery, state: FSMContext, user: dict):
+    """Удаление Premium."""
+    lang = user.get('language') or 'ru'
+    await state.set_state(PremiumStates.waiting_revoke_user)
+    await call.message.answer(
+        "Введите @username или tg_id пользователя, у которого нужно убрать Premium:",
+        reply_markup=cancel_kb(lang))
+    await call.answer()
+
+
+@router.message(PremiumStates.waiting_revoke_user, IsAdmin())
+async def s_premium_revoke(message: Message, state: FSMContext, user: dict):
+    lang = user.get('language') or 'ru'
+    target = utils.find_user_by_arg(message.text.strip())
+    if not target:
+        await message.answer(t("premium_user_not_found", lang))
+        return
+    info = utils.get_premium_info(target['id'])
+    if not info:
+        await message.answer(
+            f"❗️ У пользователя нет Premium — нечего удалять.",
+            reply_markup=admin_menu_kb(lang))
+        await state.clear()
+        return
+    utils.revoke_premium(target['id'])
+    uname = ("@" + target['username']) if target.get('username') else f"id{target['tg_id']}"
+    await message.answer(
+        f"✅ Premium удалён у пользователя <b>{uname}</b>.",
+        reply_markup=admin_menu_kb(lang))
+    await state.clear()
+
+
 @router.message(PremiumStates.waiting_user, IsAdmin())
 async def s_premium_user(message: Message, state: FSMContext, user: dict):
+    """Шаг 1: ввели юзера для выдачи Premium."""
     lang = user.get('language') or 'ru'
     target = utils.find_user_by_arg(message.text.strip())
     if not target:
         await message.answer(t("premium_user_not_found", lang))
         return
     await state.update_data(premium_user_id=target['id'])
+
+    # Покажем текущий статус
+    info = utils.get_premium_info(target['id'])
+    uname = ("@" + target['username']) if target.get('username') else f"id{target['tg_id']}"
+    status_text = ""
+    if info:
+        exp = info.get('expires_at')
+        from datetime import datetime
+        now = datetime.utcnow()
+        if not exp:
+            status_text = f"⚠️ У <b>{uname}</b> уже есть <b>бессрочный Premium</b>.\nНовое значение перезапишет старое.\n\n"
+        else:
+            try:
+                exp_dt = datetime.fromisoformat(exp)
+                if exp_dt > now:
+                    days_left = (exp_dt - now).days
+                    status_text = (
+                        f"⚠️ У <b>{uname}</b> уже есть Premium до <b>{exp[:10]}</b> "
+                        f"(осталось {days_left} дн.).\n"
+                        f"Новый срок <b>перезапишет</b> старый (не прибавится к нему).\n\n"
+                    )
+                else:
+                    status_text = f"ℹ️ У {uname} был Premium до {exp[:10]} — истёк. Можно выдать заново.\n\n"
+            except Exception:
+                pass
+
     await state.set_state(PremiumStates.waiting_days)
-    await message.answer(t("premium_ask_days", lang))
+    await message.answer(
+        f"{status_text}{t('premium_ask_days', lang)}",
+        parse_mode="HTML")
 
 
 @router.message(PremiumStates.waiting_days, IsAdmin())
@@ -764,7 +955,18 @@ async def s_premium_days(message: Message, state: FSMContext, user: dict):
     uid = data.get('premium_user_id')
     utils.grant_premium(uid, days, message.from_user.id)
     await state.clear()
-    await message.answer(t("premium_granted", lang, days=days),
+
+    # Показываем итог
+    info = utils.get_premium_info(uid)
+    target = db.fetchone("SELECT tg_id, username FROM users WHERE id=?", (uid,))
+    uname = ("@" + target['username']) if target and target['username'] else f"id{target['tg_id'] if target else '?'}"
+    if days == 0:
+        result_text = f"✅ <b>{uname}</b> получил <b>бессрочный</b> Premium."
+    else:
+        exp = info.get('expires_at') if info else None
+        result_text = (f"✅ <b>{uname}</b> получил Premium на <b>{days} дн.</b>\n"
+                       f"📅 Действует до: <b>{exp[:10] if exp else '—'}</b>")
+    await message.answer(result_text, parse_mode="HTML",
                          reply_markup=admin_menu_kb(lang))
 
 
