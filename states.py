@@ -54,6 +54,7 @@ class GrantAccessStates(StatesGroup):
 class PremiumStates(StatesGroup):
     waiting_user = State()
     waiting_days = State()
+    waiting_revoke_user = State()
 
 
 class BlockStates(StatesGroup):
