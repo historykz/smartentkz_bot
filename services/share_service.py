@@ -50,25 +50,19 @@ def build_note_deep_link(note_id: int, bot_username: str = None) -> str:
 # === Карточка теста в стиле QuizBot ===
 
 def _author_label(test: dict) -> str:
-    """Формирует строку автора по created_by."""
-    created_by = test.get("created_by")
-    if not created_by:
-        return "—"
-    row = db.fetchone(
-        "SELECT username, first_name FROM users WHERE id=?", (created_by,)
-    )
-    if not row:
-        return "—"
-    if row["username"]:
-        return f"@{row['username']}"
-    return row["first_name"] or "—"
+    """В карточке теста всегда указываем канал — а не реального админа."""
+    return config.SHARE_AUTHOR_LABEL
 
 
-def build_test_card(test: dict, bot_username: str = None) -> tuple[str, InlineKeyboardMarkup]:
+def build_test_card(test: dict, bot_username: str = None,
+                     in_bot: bool = False) -> tuple[str, InlineKeyboardMarkup]:
     """
     Возвращает (text, inline_keyboard) в стиле @QuizBot.
-    Карточка используется и в личке (после "Поделиться" → выбор теста),
-    и в любом чате, куда её отправили через inline-режим.
+
+    in_bot=True  — карточка для самого пользователя в чате с ботом.
+                   Кнопка «Пройти тест» — обычный callback run:{id}.
+    in_bot=False — карточка для шеринга в чужие чаты.
+                   Кнопка «Пройти тест» — deep-link, открывающий бот.
     """
     bu = bot_username or config.BOT_USERNAME or "bot"
     test_id = test["id"]
@@ -93,17 +87,29 @@ def build_test_card(test: dict, bot_username: str = None) -> tuple[str, InlineKe
     text = "\n".join(lines)
 
     deep_link = build_test_deep_link(test_id, bu)
-    kb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="✅ Пройти тест", url=deep_link)],
-        [InlineKeyboardButton(
-            text="📤 Отправить в группу",
-            switch_inline_query=f"test:{test_id}",
-        )],
-        [InlineKeyboardButton(
-            text="🔗 Поделиться",
-            switch_inline_query=f"test:{test_id}",
-        )],
-    ])
+
+    rows = []
+    if in_bot:
+        # В личке у юзера — callback (без deep-link через t.me)
+        rows.append([InlineKeyboardButton(
+            text="✅ Пройти тест", callback_data=f"run:{test_id}")])
+    else:
+        rows.append([InlineKeyboardButton(
+            text="✅ Пройти тест", url=deep_link)])
+
+    rows.append([InlineKeyboardButton(
+        text="📤 Отправить в группу",
+        switch_inline_query=f"test:{test_id}",
+    )])
+    rows.append([InlineKeyboardButton(
+        text="🔗 Поделиться",
+        switch_inline_query=f"test:{test_id}",
+    )])
+    if in_bot:
+        rows.append([InlineKeyboardButton(
+            text="↩️ Назад", callback_data="m:tests")])
+
+    kb = InlineKeyboardMarkup(inline_keyboard=rows)
     return text, kb
 
 
