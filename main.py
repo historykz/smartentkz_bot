@@ -22,7 +22,7 @@ import config
 import database
 from middlewares import UserContextMiddleware, AntiSpamMiddleware
 from handlers import (common, profile, user, quiz, duel,
-                       homework, rating, inline, admin)
+                       homework, rating, inline, admin, group_quiz)
 
 
 def setup_logging() -> None:
@@ -129,9 +129,14 @@ async def main() -> None:
     dp.include_router(homework.router)
     dp.include_router(rating.router)
     dp.include_router(inline.router)
+    dp.include_router(group_quiz.router)
     dp.include_router(admin.router)
 
     await set_default_commands(bot)
+
+    # Фоновая задача: уведомления об истечении Premium (раз в час)
+    from services import premium_service as _ps
+    asyncio.create_task(_ps.premium_expiry_loop(bot))
 
     log.info("Запуск polling...")
     try:
