@@ -54,18 +54,37 @@ def executemany(sql: str, seq: Iterable[Iterable[Any]]) -> sqlite3.Cursor:
         return conn.executemany(sql, seq)
 
 
-def fetchone(sql: str, params: Iterable[Any] = ()) -> Optional[sqlite3.Row]:
-    """Вернуть одну строку или None."""
-    with db_lock() as conn:
-        cur = conn.execute(sql, params)
-        return cur.fetchone()
+class _RowDict(dict):
+    """Словарь с защитой от KeyError — для совместимости с .get() и [key]."""
+    pass
 
 
-def fetchall(sql: str, params: Iterable[Any] = ()) -> list[sqlite3.Row]:
-    """Вернуть все строки."""
+def _row_to_dict(row) -> Optional[_RowDict]:
+    """Конвертирует sqlite3.Row в dict-подобный объект."""
+    if row is None:
+        return None
+    if isinstance(row, dict):
+        return _RowDict(row)
+    try:
+        return _RowDict({k: row[k] for k in row.keys()})
+    except Exception:
+        return _RowDict(dict(row))
+
+
+def fetchone(sql: str, params: Iterable[Any] = ()) -> Optional[dict]:
+    """Вернуть одну строку как dict (с поддержкой .get()) или None."""
     with db_lock() as conn:
         cur = conn.execute(sql, params)
-        return cur.fetchall()
+        row = cur.fetchone()
+        return _row_to_dict(row)
+
+
+def fetchall(sql: str, params: Iterable[Any] = ()) -> list[dict]:
+    """Вернуть все строки как dict-объекты."""
+    with db_lock() as conn:
+        cur = conn.execute(sql, params)
+        rows = cur.fetchall()
+        return [_row_to_dict(r) for r in rows if r is not None]
 
 
 def init_db() -> None:
