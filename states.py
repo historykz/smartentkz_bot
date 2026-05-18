@@ -57,6 +57,11 @@ class PremiumStates(StatesGroup):
     waiting_revoke_user = State()
 
 
+class AdminMgmtStates(StatesGroup):
+    waiting_add_user = State()
+    waiting_remove_user = State()
+
+
 class BlockStates(StatesGroup):
     waiting_user = State()
 
