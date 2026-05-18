@@ -26,6 +26,7 @@ log = logging.getLogger(__name__)
 
 class PrivateAccessStates(StatesGroup):
     waiting_user_for_grant = State()
+    waiting_days_for_grant = State()
     waiting_test_for_grant = State()
     waiting_user_for_revoke = State()
 
@@ -40,30 +41,43 @@ def is_test_private(test: dict) -> bool:
 
 
 def user_has_private_access(test_id: int, user_tg_id: int) -> bool:
-    """Есть ли у пользователя доступ к приватному тесту?"""
+    """Есть ли у пользователя доступ к приватному тесту? Проверяет срок."""
     if not user_tg_id:
         return False
-    # Админы всегда могут
     if utils.is_admin(user_tg_id):
         return True
     row = db.fetchone(
-        "SELECT 1 FROM private_test_access WHERE test_id=? AND user_tg_id=?",
+        """SELECT expires_at FROM private_test_access
+           WHERE test_id=? AND user_tg_id=?""",
         (test_id, user_tg_id))
-    return bool(row)
+    if not row:
+        return False
+    expires = dict(row).get('expires_at')
+    if not expires:
+        return True  # бессрочный
+    from datetime import datetime
+    try:
+        exp_dt = datetime.fromisoformat(expires)
+        return exp_dt > datetime.utcnow()
+    except Exception:
+        return True
 
 
 def list_user_private_tests(user_tg_id: int) -> list[dict]:
-    """Список приватных тестов, доступных конкретному пользователю."""
+    """Список приватных тестов, доступных конкретному пользователю (не истёкшие)."""
     if utils.is_admin(user_tg_id):
         rows = db.fetchall(
             "SELECT * FROM tests WHERE is_private=1 AND status='active' ORDER BY id DESC")
     else:
+        from datetime import datetime
+        now_iso = datetime.utcnow().isoformat()
         rows = db.fetchall(
             """SELECT t.* FROM tests t
                JOIN private_test_access p ON p.test_id = t.id
                WHERE t.is_private=1 AND t.status='active' AND p.user_tg_id=?
+                 AND (p.expires_at IS NULL OR p.expires_at > ?)
                ORDER BY t.id DESC""",
-            (user_tg_id,))
+            (user_tg_id, now_iso))
     return [dict(r) for r in rows]
 
 
@@ -149,49 +163,163 @@ async def cb_opens_grant(call: CallbackQuery, state: FSMContext):
     await state.clear()
     await state.set_state(PrivateAccessStates.waiting_user_for_grant)
     await call.message.answer(
-        "👤 Введите <b>@username</b> или <b>tg_id</b> пользователя, "
-        "которому хотите выдать доступ:",
+        "👤 Введите <b>@username</b> или <b>tg_id</b> пользователей.\n\n"
+        "<b>Можно сразу до 15 человек</b> — через запятую, пробел или с новой строки:\n"
+        "<code>@vasya, @petya 12345</code>\n"
+        "или\n"
+        "<code>@vasya\n@petya\n12345</code>",
         parse_mode="HTML")
     await call.answer()
 
 
+def _parse_users_bulk(text: str) -> list[str]:
+    """Парсит массив идентификаторов из строки. Поддерживает запятые, пробелы, переносы."""
+    import re
+    raw = re.split(r'[,\s\n]+', text or "")
+    out = []
+    for r in raw:
+        r = r.strip()
+        if not r:
+            continue
+        # Уберём @ если есть в начале
+        if r.startswith("@"):
+            out.append(r)
+        elif r.isdigit():
+            out.append(r)
+        else:
+            out.append(r)  # на случай ника без @
+    # Уникальные, сохраняя порядок
+    seen = set()
+    result = []
+    for x in out:
+        key = x.lower().lstrip("@")
+        if key in seen:
+            continue
+        seen.add(key)
+        result.append(x)
+    return result
+
+
 @router.message(PrivateAccessStates.waiting_user_for_grant, IsAdmin())
 async def s_opens_grant_user(message: Message, state: FSMContext):
-    arg = (message.text or "").strip()
-    # Пробуем найти юзера
-    target_tg_id = None
-    target_name = None
-    if arg.isdigit():
-        target_tg_id = int(arg)
-        u = db.fetchone("SELECT tg_id, username, first_name FROM users WHERE tg_id=?", (target_tg_id,))
-        if u:
-            target_name = ("@" + u['username']) if u['username'] else (u['first_name'] or f"id{target_tg_id}")
-    else:
-        target = utils.find_user_by_arg(arg)
-        if target:
-            target_tg_id = target['tg_id']
-            target_name = ("@" + target['username']) if target.get('username') else (
-                target.get('first_name') or f"id{target_tg_id}")
+    raw = (message.text or "").strip()
+    parsed = _parse_users_bulk(raw)
 
-    if target_tg_id is None:
-        await message.answer(
-            "❌ Не нашёл пользователя. Введите tg_id числом или @username "
-            "(пользователь должен был писать боту /start).")
+    if not parsed:
+        await message.answer("❌ Не распознал ни одного пользователя. Попробуйте ещё раз.")
         return
 
-    await state.update_data(grant_target_tg=target_tg_id, grant_target_name=target_name or str(target_tg_id))
+    if len(parsed) > 15:
+        await message.answer(
+            f"⚠️ Можно максимум 15 человек за раз. Вы прислали {len(parsed)}. "
+            f"Отправьте список покороче.")
+        return
 
-    # Показываем список приватных тестов на выбор
+    # Резолвим каждого
+    found_users = []  # [(tg_id, display_name), ...]
+    not_found = []
+    for ident in parsed:
+        target_tg_id = None
+        target_name = None
+        if ident.isdigit():
+            target_tg_id = int(ident)
+            u = db.fetchone(
+                "SELECT tg_id, username, first_name FROM users WHERE tg_id=?",
+                (target_tg_id,))
+            if u:
+                ud = dict(u)
+                target_name = ("@" + ud['username']) if ud.get('username') else (
+                    ud.get('first_name') or f"id{target_tg_id}")
+            else:
+                target_name = f"id{target_tg_id}"
+        else:
+            target = utils.find_user_by_arg(ident)
+            if target:
+                target_tg_id = target['tg_id']
+                target_name = ("@" + target['username']) if target.get('username') else (
+                    target.get('first_name') or f"id{target_tg_id}")
+            else:
+                not_found.append(ident)
+                continue
+        found_users.append((target_tg_id, target_name))
+
+    if not found_users:
+        await message.answer(
+            "❌ Ни одного пользователя не нашёл.\n"
+            "Те, кто вводил по @username, должны были писать /start боту. "
+            "Или вводите tg_id числом.")
+        return
+
+    # Сохраняем в state
+    await state.update_data(grant_targets=found_users, grant_not_found=not_found)
+
+    # Спрашиваем срок
+    kb = InlineKeyboardBuilder()
+    for label, days in [("⏱ 7 дней", 7), ("📅 30 дней", 30),
+                         ("🗓 90 дней", 90), ("♾ Бессрочно", 0)]:
+        kb.button(text=label, callback_data=f"opensdays:{days}")
+    kb.button(text="✏️ Ввести вручную", callback_data="opensdays:custom")
+    kb.button(text="❌ Отмена", callback_data="opens:back")
+    kb.adjust(2)
+
+    summary = "\n".join(
+        f"• <b>{utils.escape_html(name)}</b> (<code>{tg}</code>)"
+        for tg, name in found_users[:15])
+    extra = ""
+    if not_found:
+        extra = f"\n\n⚠️ Не нашёл: {', '.join(not_found[:5])}"
+
+    await state.set_state(PrivateAccessStates.waiting_days_for_grant)
+    await message.answer(
+        f"👥 Распознано: <b>{len(found_users)}</b>\n\n"
+        f"{summary}{extra}\n\n"
+        f"⏱ <b>На какой срок выдать доступ?</b>",
+        reply_markup=kb.as_markup(), parse_mode="HTML")
+
+
+@router.callback_query(F.data.startswith("opensdays:"), IsAdmin())
+async def cb_opens_days(call: CallbackQuery, state: FSMContext):
+    arg = call.data.split(":", 1)[1]
+    if arg == "custom":
+        await call.message.answer(
+            "Введите количество дней числом (1–365) или <code>0</code> для бессрочного доступа:",
+            parse_mode="HTML")
+        await call.answer()
+        return
+    try:
+        days = int(arg)
+    except ValueError:
+        await call.answer()
+        return
+    await _proceed_to_test_choice(call.message, state, days, edit=False)
+    await call.answer()
+
+
+@router.message(PrivateAccessStates.waiting_days_for_grant, IsAdmin())
+async def s_opens_days_input(message: Message, state: FSMContext):
+    """Ручной ввод дней."""
+    txt = (message.text or "").strip()
+    if not txt.isdigit():
+        await message.answer("❌ Введите число от 0 до 365 (0 — бессрочно).")
+        return
+    days = int(txt)
+    if days > 365:
+        await message.answer("❌ Максимум 365 дней.")
+        return
+    await _proceed_to_test_choice(message, state, days, edit=False)
+
+
+async def _proceed_to_test_choice(message_or_msg, state: FSMContext, days: int, edit: bool):
+    """Сохраняем срок и показываем список приватных тестов."""
+    await state.update_data(grant_days=days)
     tests = db.fetchall(
         "SELECT id, title FROM tests WHERE is_private=1 AND status='active' ORDER BY id DESC LIMIT 30")
-
     if not tests:
-        await message.answer(
+        await message_or_msg.answer(
             "⚠️ Нет ни одного приватного теста.\n"
-            "Сначала создайте/пометьте тест как приватный, потом выдавайте доступ.")
+            "Сначала создайте/пометьте тест как приватный.")
         await state.clear()
         return
-
     kb = InlineKeyboardBuilder()
     for t in tests:
         title = (t['title'] or '—')[:50]
@@ -199,11 +327,10 @@ async def s_opens_grant_user(message: Message, state: FSMContext):
     kb.button(text="⚡️ Дать ВСЕ приватные сразу", callback_data="opensgrant:all")
     kb.button(text="❌ Отмена", callback_data="opens:back")
     kb.adjust(1)
-
+    duration_label = "бессрочно" if days == 0 else f"{days} дней"
     await state.set_state(PrivateAccessStates.waiting_test_for_grant)
-    await message.answer(
-        f"👤 Пользователь: <b>{utils.escape_html(target_name or str(target_tg_id))}</b>\n"
-        f"tg_id: <code>{target_tg_id}</code>\n\n"
+    await message_or_msg.answer(
+        f"⏱ Срок: <b>{duration_label}</b>\n\n"
         f"Выберите тест для выдачи доступа:",
         reply_markup=kb.as_markup(), parse_mode="HTML")
 
@@ -211,10 +338,10 @@ async def s_opens_grant_user(message: Message, state: FSMContext):
 @router.callback_query(F.data.startswith("opensgrant:"), IsAdmin())
 async def cb_opens_grant_test(call: CallbackQuery, state: FSMContext):
     data = await state.get_data()
-    target_tg_id = data.get('grant_target_tg')
-    target_name = data.get('grant_target_name', str(target_tg_id))
+    targets = data.get('grant_targets') or []
+    days = data.get('grant_days', 0)
 
-    if not target_tg_id:
+    if not targets:
         await call.answer("❌ Сессия истекла, начните заново.", show_alert=True)
         await state.clear()
         return
@@ -222,67 +349,82 @@ async def cb_opens_grant_test(call: CallbackQuery, state: FSMContext):
     arg = call.data.split(":", 1)[1]
 
     if arg == "all":
-        tests = db.fetchall(
+        tests_to_grant = db.fetchall(
             "SELECT id, title FROM tests WHERE is_private=1 AND status='active'")
-        granted = 0
-        for t in tests:
+        tests_to_grant = [dict(t) for t in tests_to_grant]
+    else:
+        try:
+            test_id = int(arg)
+        except ValueError:
+            await call.answer()
+            return
+        test = db.fetchone("SELECT * FROM tests WHERE id=?", (test_id,))
+        if not test:
+            await call.answer("Тест не найден.", show_alert=True)
+            return
+        tests_to_grant = [dict(test)]
+
+    # Вычисляем expires_at
+    expires_at = None
+    if days > 0:
+        from datetime import datetime, timedelta
+        expires_at = (datetime.utcnow() + timedelta(days=days)).isoformat()
+
+    granted_count = 0
+    notified_count = 0
+
+    for tg_id, name in targets:
+        for tst in tests_to_grant:
             try:
+                # UPSERT — если запись есть, обновляем expires_at
                 db.execute(
-                    """INSERT OR IGNORE INTO private_test_access
-                       (test_id, user_tg_id, granted_by) VALUES (?,?,?)""",
-                    (t['id'], target_tg_id, call.from_user.id))
-                granted += 1
-            except Exception:
-                pass
-        await call.message.answer(
-            f"✅ Выдан доступ ко <b>всем</b> приватным тестам "
-            f"({granted} шт.) пользователю <b>{utils.escape_html(target_name)}</b>.",
-            parse_mode="HTML")
-        await state.clear()
-        await _notify_user_grant(call.bot, target_tg_id, None, all_tests=True)
-        await call.answer("✅")
-        return
+                    """INSERT INTO private_test_access
+                          (test_id, user_tg_id, granted_by, expires_at, notified_expired)
+                       VALUES (?,?,?,?,0)
+                       ON CONFLICT(test_id, user_tg_id) DO UPDATE SET
+                          expires_at=excluded.expires_at,
+                          granted_by=excluded.granted_by,
+                          notified_expired=0""",
+                    (tst['id'], tg_id, call.from_user.id, expires_at))
+                granted_count += 1
+            except Exception as e:
+                log.warning("Ошибка выдачи доступа tg=%s test=%s: %s", tg_id, tst['id'], e)
+        try:
+            await _notify_user_grant(
+                call.bot, tg_id,
+                tests_to_grant[0] if len(tests_to_grant) == 1 else None,
+                all_tests=(arg == "all"),
+                days=days)
+            notified_count += 1
+        except Exception:
+            pass
 
-    try:
-        test_id = int(arg)
-    except ValueError:
-        await call.answer()
-        return
-
-    test = db.fetchone("SELECT * FROM tests WHERE id=?", (test_id,))
-    if not test:
-        await call.answer("Тест не найден.", show_alert=True)
-        return
-
-    try:
-        db.execute(
-            """INSERT OR IGNORE INTO private_test_access
-               (test_id, user_tg_id, granted_by) VALUES (?,?,?)""",
-            (test_id, target_tg_id, call.from_user.id))
-    except Exception as e:
-        await call.answer(f"Ошибка: {e}", show_alert=True)
-        return
-
-    title = utils.escape_html(test['title'] or '—')
-    await call.message.answer(
-        f"✅ Доступ выдан!\n"
-        f"<b>{utils.escape_html(target_name)}</b> теперь может пройти "
-        f"тест <b>«{title}»</b>.",
-        parse_mode="HTML")
+    duration_label = "бессрочно" if days == 0 else f"{days} дней"
+    summary = (
+        f"✅ <b>Доступ выдан!</b>\n\n"
+        f"👥 Пользователей: <b>{len(targets)}</b>\n"
+        f"🔐 Тестов: <b>{len(tests_to_grant)}</b>\n"
+        f"⏱ Срок: <b>{duration_label}</b>\n"
+        f"📊 Записей: <b>{granted_count}</b>\n"
+        f"📩 Уведомлено: <b>{notified_count}</b>"
+    )
+    await call.message.answer(summary, parse_mode="HTML")
     await state.clear()
-    await _notify_user_grant(call.bot, target_tg_id, dict(test))
     await call.answer("✅")
 
 
 async def _notify_user_grant(bot: Bot, target_tg_id: int,
-                              test: dict = None, all_tests: bool = False):
+                              test: dict = None, all_tests: bool = False,
+                              days: int = 0):
     """Уведомляем пользователя о новом доступе."""
+    duration_label = "♾ Доступ бессрочный" if days == 0 else f"⏱ Срок: <b>{days} дней</b>"
     try:
         if all_tests:
             text = (
-                "🎉 <b>Вам открыт закрытый доступ!</b>\n\n"
-                "Администратор открыл вам доступ ко <b>всем приватным тестам</b>.\n\n"
-                "Перейдите в раздел «📚 Тесты» → «🔐 Мои закрытые тесты»."
+                f"🎉 <b>Вам открыт закрытый доступ!</b>\n\n"
+                f"Администратор открыл вам доступ ко <b>всем приватным тестам</b>.\n\n"
+                f"{duration_label}\n\n"
+                f"Перейдите в каталог тестов."
             )
             kb = InlineKeyboardMarkup(inline_keyboard=[[
                 InlineKeyboardButton(text="📚 Открыть каталог", callback_data="m:tests")
@@ -297,8 +439,9 @@ async def _notify_user_grant(bot: Bot, target_tg_id: int,
                 f"🔐 Тест: <b>{title}</b>\n"
                 f"📚 Вопросов: {qcount}\n"
                 f"⏱ Время: {test.get('time_per_question') or 30} сек/вопрос\n\n"
+                f"{duration_label}\n\n"
                 f"Этот тест не виден другим пользователям — "
-                f"только тем, кому администратор лично его открыл."
+                f"только тем, кому администратор лично открыл."
             )
             kb = InlineKeyboardMarkup(inline_keyboard=[[
                 InlineKeyboardButton(text="🔓 Открыть тест",
@@ -368,37 +511,71 @@ async def cb_opens_revoke(call: CallbackQuery, state: FSMContext):
     await state.clear()
     await state.set_state(PrivateAccessStates.waiting_user_for_revoke)
     await call.message.answer(
-        "🗑 Введите <b>@username</b> или <b>tg_id</b> пользователя, "
-        "у которого хотите забрать <b>весь</b> приватный доступ:",
+        "🗑 Введите <b>@username</b> или <b>tg_id</b> пользователей, "
+        "у которых хотите забрать приватный доступ.\n\n"
+        "<b>Можно сразу до 15 человек</b> через запятую, пробел или с новой строки:\n"
+        "<code>@vasya, @petya 12345</code>",
         parse_mode="HTML")
     await call.answer()
 
 
 @router.message(PrivateAccessStates.waiting_user_for_revoke, IsAdmin())
 async def s_opens_revoke(message: Message, state: FSMContext):
-    arg = (message.text or "").strip()
-    tg_id = None
-    if arg.isdigit():
-        tg_id = int(arg)
-    else:
-        target = utils.find_user_by_arg(arg)
-        if target:
-            tg_id = target['tg_id']
-    if tg_id is None:
-        await message.answer("❌ Не нашёл пользователя.")
+    raw = (message.text or "").strip()
+    parsed = _parse_users_bulk(raw)
+
+    if not parsed:
+        await message.answer("❌ Не распознал ни одного пользователя.")
         return
 
-    before = db.fetchone(
-        "SELECT COUNT(*) AS c FROM private_test_access WHERE user_tg_id=?",
-        (tg_id,))['c']
-    if before == 0:
-        await message.answer("ℹ️ У этого пользователя не было приватного доступа.")
-        await state.clear()
+    if len(parsed) > 15:
+        await message.answer(
+            f"⚠️ Максимум 15 человек за раз. Вы прислали {len(parsed)}.")
         return
 
-    db.execute("DELETE FROM private_test_access WHERE user_tg_id=?", (tg_id,))
+    # Резолвим
+    resolved = []
+    not_found = []
+    for ident in parsed:
+        tg_id = None
+        if ident.isdigit():
+            tg_id = int(ident)
+        else:
+            target = utils.find_user_by_arg(ident)
+            if target:
+                tg_id = target['tg_id']
+        if tg_id:
+            resolved.append(tg_id)
+        else:
+            not_found.append(ident)
+
+    if not resolved:
+        await message.answer("❌ Никого не нашёл.")
+        return
+
+    total_revoked = 0
+    affected_users = 0
+    for tg in resolved:
+        before = db.fetchone(
+            "SELECT COUNT(*) AS c FROM private_test_access WHERE user_tg_id=?",
+            (tg,))['c']
+        if before > 0:
+            db.execute("DELETE FROM private_test_access WHERE user_tg_id=?", (tg,))
+            total_revoked += before
+            affected_users += 1
+            # Уведомление
+            try:
+                await message.bot.send_message(
+                    tg,
+                    "ℹ️ Администратор отозвал у вас приватный доступ к тестам.")
+            except Exception:
+                pass
+
+    extra = f"\n\n⚠️ Не нашёл: {', '.join(not_found[:5])}" if not_found else ""
     await message.answer(
-        f"✅ У пользователя <code>{tg_id}</code> отозван доступ ({before} тестов).",
+        f"✅ <b>Доступ отозван</b>\n\n"
+        f"👥 Пользователей затронуто: <b>{affected_users}</b>\n"
+        f"🔐 Записей удалено: <b>{total_revoked}</b>{extra}",
         parse_mode="HTML")
     await state.clear()
 
@@ -426,3 +603,45 @@ async def cb_opens_back(call: CallbackQuery, state: FSMContext):
         await call.message.answer(text, reply_markup=kb.as_markup(),
                                     parse_mode="HTML")
     await call.answer()
+
+
+# ============ Фоновая проверка истечения доступа ============
+
+async def expiry_check_loop(bot: Bot):
+    """
+    Раз в час проверяет истёкшие приватные доступы.
+    Уведомляет юзеров и помечает запись.
+    """
+    import asyncio
+    from datetime import datetime
+    while True:
+        try:
+            now = datetime.utcnow().isoformat()
+            expired = db.fetchall(
+                """SELECT p.id, p.user_tg_id, p.test_id, t.title
+                   FROM private_test_access p
+                   LEFT JOIN tests t ON t.id = p.test_id
+                   WHERE p.expires_at IS NOT NULL
+                     AND p.expires_at < ?
+                     AND COALESCE(p.notified_expired, 0) = 0
+                   LIMIT 200""", (now,))
+            for r in expired:
+                title = utils.escape_html(r['title'] or '—')
+                try:
+                    await bot.send_message(
+                        r['user_tg_id'],
+                        f"⏳ <b>Истёк срок приватного доступа</b>\n\n"
+                        f"🔐 Тест: <b>{title}</b>\n\n"
+                        f"Для продления — обратитесь к администратору.",
+                        parse_mode="HTML")
+                except Exception:
+                    pass
+                # Помечаем чтобы не уведомлять снова и удаляем запись
+                try:
+                    db.execute(
+                        "DELETE FROM private_test_access WHERE id=?", (r['id'],))
+                except Exception:
+                    pass
+        except Exception as e:
+            log.warning("expiry_check_loop error: %s", e)
+        await asyncio.sleep(3600)  # раз в час
