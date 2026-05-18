@@ -106,12 +106,11 @@ def build_test_card(test: dict, bot_username: str = None,
 
     # Админ-кнопки (только в личке)
     if in_bot and viewer_is_admin:
-        # "Отправить в группу" → нативный share-picker через switch_inline_query
-        # Префикс grp: → inline возвращает результат, который Telegram
-        # отправит в выбранный чат с кнопкой "Запустить тест" для админа
+        # "Отправить в группу" — открываем инструкцию (не inline, т.к.
+        # callback от inline-сообщения не даёт chat_id группы)
         rows.append([InlineKeyboardButton(
             text="📤 Отправить в группу",
-            switch_inline_query=f"grp:{test_id}",
+            callback_data=f"groupsend:{test_id}",
         )])
         rows.append([InlineKeyboardButton(
             text="📊 Статистика",
@@ -211,26 +210,13 @@ def build_inline_results(query: str, user_lang: Optional[str],
 
     Поддерживаемые форматы query:
         "test:<id>"      — конкретный тест (карточка для шеринга друзьям)
-        "grp:<id>"       — спец-карточка для запуска теста в группе (только для админов)
         "<search text>"  — поиск по title/subject
         ""               — последние 30 активных
     """
     bu = bot_username or config.BOT_USERNAME or "bot"
     q = (query or "").strip()
 
-    # 1) Спец-режим: запуск в группе — только админ
-    if q.lower().startswith("grp:"):
-        rest = q.split(":", 1)[1].strip()
-        if not rest.isdigit():
-            return []
-        if user_tg_id is None or user_tg_id not in (config.ADMIN_IDS or []):
-            return []  # не админ — пусто
-        test = _fetch_test(int(rest))
-        if not test:
-            return []
-        return [_build_group_launch_card(test, bu, user_tg_id)]
-
-    # 2) Точечный шеринг через switch_inline_query
+    # 1) Точечный шеринг через switch_inline_query
     if q.lower().startswith("test:"):
         rest = q.split(":", 1)[1].strip()
         if rest.isdigit():
