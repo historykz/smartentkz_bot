@@ -117,19 +117,37 @@ async def main() -> None:
     @dp.errors()
     async def global_error_handler(event: ErrorEvent):
         log.exception("Unhandled exception: %s", event.exception)
-        # Если ошибка в callback — снимем «загрузку» у юзера
+        err_text = str(event.exception)[:200]
         try:
             update = event.update
             if update and update.callback_query:
+                user_id = update.callback_query.from_user.id if update.callback_query.from_user else None
+                # Админу показываем настоящую ошибку, обычному юзеру — общую
+                is_a = False
                 try:
-                    await update.callback_query.answer(
-                        "⚠️ Произошла ошибка. Попробуйте ещё раз.",
-                        show_alert=False)
+                    from utils import is_admin
+                    is_a = is_admin(user_id) if user_id else False
+                except Exception:
+                    pass
+                if is_a:
+                    msg = f"⚠️ Ошибка: {err_text}"
+                else:
+                    msg = "⚠️ Произошла ошибка. Попробуйте ещё раз."
+                try:
+                    await update.callback_query.answer(msg, show_alert=True)
+                except Exception:
+                    pass
+            elif update and update.message:
+                try:
+                    user_id = update.message.from_user.id if update.message.from_user else None
+                    from utils import is_admin
+                    if is_admin(user_id):
+                        await update.message.answer(f"⚠️ Ошибка: {err_text}")
                 except Exception:
                     pass
         except Exception:
             pass
-        return True  # ошибка обработана, бот не падает
+        return True
 
     # Узнаём username бота — нужен для deep-link'ов
     try:
