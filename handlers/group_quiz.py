@@ -94,76 +94,39 @@ async def cmd_stop_group(message: Message, bot: Bot):
 
 # ============ Запуск теста в группу ============
 
-@router.callback_query(F.data.startswith("groupsend:"))
-async def cb_group_send(call: CallbackQuery, user: dict):
-    """Админ нажал «Отправить в группу» в карточке теста."""
-    if not utils.is_admin(call.from_user.id):
-        await call.answer("⛔ Только для администраторов бота.", show_alert=True)
-        return
-    try:
-        test_id = int(call.data.split(":")[1])
-    except (ValueError, IndexError):
-        await call.answer()
-        return
-
-    test = test_runner.get_test(test_id)
-    if not test:
-        await call.answer("Тест не найден.", show_alert=True)
-        return
-
-    # Показываем список групп, где бот + админ
-    groups = db.fetchall(
-        "SELECT chat_id, title FROM known_groups ORDER BY seen_at DESC LIMIT 50")
-    if not groups:
-        await call.message.answer(
-            "📭 <b>Пока нет известных групп.</b>\n\n"
-            "Добавьте бота в группу как администратора, чтобы она появилась здесь. "
-            "Telegram не даёт получить полный список групп автоматически — "
-            "бот узнаёт о группе только при добавлении или активности.")
-        await call.answer()
-        return
-
-    # Фильтруем те, где админ тоже состоит (батч-запрос)
-    available = []
-    for g in groups:
-        try:
-            member = await call.bot.get_chat_member(g['chat_id'], call.from_user.id)
-            if member.status in ("creator", "administrator", "member"):
-                available.append(g)
-        except Exception:
-            continue
-
-    if not available:
-        await call.message.answer(
-            "📭 Не нашёл групп, где вы состоите вместе с ботом.\n"
-            "Убедитесь, что бот добавлен в группу.")
-        await call.answer()
-        return
-
-    kb = InlineKeyboardBuilder()
-    for g in available[:30]:
-        title = (g['title'] or f"Чат {g['chat_id']}")[:55]
-        kb.button(text=title, callback_data=f"gqstart:{test_id}:{g['chat_id']}")
-    kb.button(text="↩️ Отмена", callback_data=f"opentest:{test_id}")
-    kb.adjust(1)
-    await call.message.answer(
-        "📤 <b>Выберите группу, куда отправить тест:</b>",
-        reply_markup=kb.as_markup(), parse_mode="HTML")
-    await call.answer()
-
-
-@router.callback_query(F.data.startswith("gqstart:"))
-async def cb_gq_start(call: CallbackQuery, user: dict):
-    """Запуск группового теста в выбранной группе."""
-    if not utils.is_admin(call.from_user.id):
-        await call.answer("⛔", show_alert=True)
-        return
+@router.callback_query(F.data.startswith("gqlaunch:"))
+async def cb_gq_launch(call: CallbackQuery):
+    """
+    Запуск группового теста из inline-карточки.
+    Сработает только если callback нажал тот же админ, кто её отправил.
+    """
     try:
         parts = call.data.split(":")
         test_id = int(parts[1])
-        chat_id = int(parts[2])
+        intended_admin_id = int(parts[2])
     except (ValueError, IndexError):
         await call.answer()
+        return
+
+    # Только админ бота
+    if not utils.is_admin(call.from_user.id):
+        await call.answer(
+            "⛔ Только администратор бота может запустить тест.",
+            show_alert=True)
+        return
+
+    # Проверка: тот ли админ, кто отправлял карточку
+    if call.from_user.id != intended_admin_id:
+        await call.answer(
+            "⛔ Эту карточку отправил другой администратор. Отправьте свою.",
+            show_alert=True)
+        return
+
+    chat = call.message.chat if call.message else None
+    if not chat or chat.type not in ("group", "supergroup"):
+        await call.answer(
+            "⚠️ Эту кнопку нужно нажимать в группе, а не в личке.",
+            show_alert=True)
         return
 
     test = test_runner.get_test(test_id)
@@ -171,30 +134,31 @@ async def cb_gq_start(call: CallbackQuery, user: dict):
         await call.answer("Тест не найден.", show_alert=True)
         return
 
-    # Защита: тест не приватный/платный (если это критично)
-    # Бесплатные и Premium-тесты можно запускать в группе. Приватные не доступны.
+    # Записываем группу в known_groups для будущей статистики
+    db.execute(
+        """INSERT OR IGNORE INTO known_groups (chat_id, title, type, added_by, seen_at)
+           VALUES (?,?,?,?, CURRENT_TIMESTAMP)""",
+        (chat.id, chat.title or "", chat.type, call.from_user.id))
 
-    lang = user.get('language') or 'ru' if user else 'ru'
-    ok, msg_key, gq_id = await group_quiz_service.start_lobby(
-        call.bot, dict(test), chat_id, call.from_user.id, language=lang)
+    ok, key, gq_id = await group_quiz_service.start_lobby(
+        call.bot, dict(test), chat.id, call.from_user.id, language='ru')
+
     if not ok:
-        if msg_key == "already_running":
+        if key == "already_running":
             await call.answer(
-                "⚠️ В этой группе уже идёт тест. Сначала остановите его (/stop).",
+                "⚠️ В этой группе уже идёт тест. Сначала /stop.",
                 show_alert=True)
         else:
-            await call.answer(
-                f"❌ Не удалось запустить: {msg_key}\nУбедитесь, что бот в группе.",
-                show_alert=True)
+            await call.answer(f"❌ Не удалось: {key}", show_alert=True)
         return
 
+    # Удаляем inline-карточку (она больше не нужна — лобби-карточка уже отправлена)
     try:
-        await call.message.answer(
-            f"✅ Тест запущен в группе. ID сессии: <code>{gq_id}</code>",
-            parse_mode="HTML")
+        await call.message.delete()
     except Exception:
         pass
-    await call.answer()
+
+    await call.answer("✅ Тест запущен!")
 
 
 # ============ Игрок присоединяется ============
