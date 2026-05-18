@@ -320,25 +320,54 @@ async def cb_admtest(call: CallbackQuery, user: dict):
     except (ValueError, IndexError):
         await call.answer()
         return
-    test = db.fetchone("SELECT * FROM tests WHERE id=?", (tid,))
+    try:
+        test = db.fetchone("SELECT * FROM tests WHERE id=?", (tid,))
+    except Exception as e:
+        log.warning("admtest fetch error: %s", e)
+        await call.answer(f"⚠️ Ошибка БД: {e}", show_alert=True)
+        return
     if not test:
         await call.answer(t("test_not_found", lang), show_alert=True)
         return
-    qcount = db.fetchone("SELECT COUNT(*) AS c FROM questions WHERE test_id=?", (tid,))['c']
-    status_label = t(f"test_status_{test['status']}", lang)
-    is_private = bool(test.get('is_private'))
-    text = (f"<b>{utils.escape_html(test['title'])}</b>\n\n"
+
+    try:
+        qcount_row = db.fetchone("SELECT COUNT(*) AS c FROM questions WHERE test_id=?", (tid,))
+        qcount = qcount_row['c'] if qcount_row else 0
+    except Exception:
+        qcount = 0
+
+    try:
+        status_label = t(f"test_status_{test['status']}", lang)
+    except Exception:
+        status_label = test.get('status', 'unknown')
+
+    # is_private может отсутствовать в старой БД
+    is_private = False
+    try:
+        is_private = bool(test['is_private']) if 'is_private' in test.keys() else False
+    except Exception:
+        is_private = False
+
+    text = (f"<b>{utils.escape_html(test['title'] or '—')}</b>\n\n"
             f"ID: {test['id']}\n"
-            f"Тип: {test['test_type']}\n"
-            f"Язык: {test['language']}\n"
+            f"Тип: {test.get('test_type') or '—'}\n"
+            f"Язык: {test.get('language') or '—'}\n"
             f"Статус: {status_label}\n"
             f"Вопросов: {qcount}\n"
-            f"Платный: {'да' if test['is_paid'] else 'нет'}\n"
+            f"Платный: {'да' if test.get('is_paid') else 'нет'}\n"
             f"Приватный: {'🔐 ДА' if is_private else 'нет'}")
     try:
-        await call.message.edit_text(text, reply_markup=admin_test_actions_kb(tid, lang, is_private=is_private))
+        kb = admin_test_actions_kb(tid, lang, is_private=is_private)
+    except Exception as e:
+        log.warning("admin_test_actions_kb error: %s", e)
+        kb = None
+    try:
+        await call.message.edit_text(text, reply_markup=kb, parse_mode="HTML")
     except Exception:
-        await call.message.answer(text, reply_markup=admin_test_actions_kb(tid, lang, is_private=is_private))
+        try:
+            await call.message.answer(text, reply_markup=kb, parse_mode="HTML")
+        except Exception as e:
+            log.warning("admtest send error: %s", e)
     await call.answer()
 
 
@@ -352,18 +381,28 @@ async def cb_admpriv(call: CallbackQuery, user: dict):
     except (ValueError, IndexError):
         await call.answer()
         return
-    test = db.fetchone("SELECT * FROM tests WHERE id=?", (tid,))
+    try:
+        test = db.fetchone("SELECT * FROM tests WHERE id=?", (tid,))
+    except Exception as e:
+        await call.answer(f"Ошибка БД: {e}", show_alert=True)
+        return
     if not test:
         await call.answer("Тест не найден.", show_alert=True)
         return
-    db.execute("UPDATE tests SET is_private=? WHERE id=?", (new_value, tid))
+    try:
+        db.execute("UPDATE tests SET is_private=? WHERE id=?", (new_value, tid))
+    except Exception as e:
+        await call.answer(
+            f"⚠️ Колонка is_private отсутствует в БД. "
+            f"Перезапустите сервис, чтобы применилась миграция. ({e})",
+            show_alert=True)
+        return
     if new_value:
         await call.answer(
             "✅ Тест теперь ПРИВАТНЫЙ. Видны только тем, кому выдали доступ через /opens",
             show_alert=True)
     else:
         await call.answer("✅ Приватный режим снят. Тест снова публичный.", show_alert=True)
-    # Перерисовываем карточку
     call.data = f"admtest:{tid}"
     await cb_admtest(call, user)
 
@@ -1004,43 +1043,50 @@ async def s_premium_days(message: Message, state: FSMContext, user: dict):
     # ── Уведомление самому пользователю + список платных тестов ──
     if target and target.get('tg_id'):
         try:
-            user_lang = target.get('language') or 'ru'
+            # Список ВСЕХ платных тестов (без фильтра по языку, чтобы точно показать)
             paid_tests = db.fetchall(
-                "SELECT id, title, subject, time_per_question FROM tests "
-                "WHERE is_paid=1 AND status='active' AND language=? ORDER BY id DESC LIMIT 20",
-                (user_lang,))
+                """SELECT id, title, subject, time_per_question
+                   FROM tests
+                   WHERE is_paid=1 AND status='active'
+                     AND COALESCE(is_private,0)=0
+                   ORDER BY id DESC LIMIT 30""")
+
+            duration_text = ("♾ <b>Бессрочно</b>" if days == 0
+                              else f"⏱ <b>{days} дн.</b> (до <b>{until_str}</b>)")
 
             congrats = (
-                "🎉 <b>Поздравляем! Вы приобрели Premium!</b>\n\n"
-                f"💎 Срок действия: <b>{'бессрочно' if days==0 else f'{days} дн. (до {until_str})'}</b>\n\n"
-                "Теперь вам доступны:\n"
-                "✅ Все платные тесты\n"
-                "✅ Все разделы и материалы\n"
-                "✅ Quiz-формат и таймер как на настоящем экзамене\n"
-                "✅ Новые тесты сразу после добавления\n\n"
+                "🎉 <b>Поздравляем! Вы получили Premium-доступ!</b>\n\n"
+                f"💎 Срок действия: {duration_text}\n\n"
+                "<b>Ваши новые привилегии:</b>\n"
+                "✅ Доступ ко всем платным тестам\n"
+                "✅ Полные разделы и материалы для подготовки\n"
+                "✅ Quiz-формат с таймером (как на ЕНТ)\n"
+                "✅ Новые тесты сразу после добавления\n"
+                "✅ Расширенная статистика результатов\n"
+                "✅ Приоритетная поддержка\n\n"
             )
 
+            from aiogram.utils.keyboard import InlineKeyboardBuilder
+            kb = InlineKeyboardBuilder()
+
             if paid_tests:
-                congrats += "🔓 <b>Доступные платные тесты:</b>\nВыберите тест ниже, чтобы начать.\n"
-                from aiogram.utils.keyboard import InlineKeyboardBuilder
-                kb = InlineKeyboardBuilder()
-                for tst in paid_tests:
-                    label = f"💎 {tst['title'][:50]}"
-                    kb.button(text=label, callback_data=f"opentest:{tst['id']}")
-                kb.button(text="📚 Каталог тестов", callback_data="m:tests")
-                kb.adjust(1)
-                await message.bot.send_message(
-                    target['tg_id'], congrats,
-                    reply_markup=kb.as_markup(), parse_mode="HTML")
+                congrats += f"🔓 <b>Платных тестов открыто: {len(paid_tests)}</b>\n"
+                congrats += "Выберите тест, чтобы начать:"
+                for tst in paid_tests[:15]:  # макс 15 кнопок
+                    title_short = (tst['title'] or '—')[:45]
+                    kb.button(text=f"💎 {title_short}",
+                              callback_data=f"opentest:{tst['id']}")
+                kb.button(text="📚 Все тесты", callback_data="m:tests")
             else:
-                congrats += "📚 Откройте каталог тестов, чтобы начать."
-                from aiogram.utils.keyboard import InlineKeyboardBuilder
-                kb = InlineKeyboardBuilder()
-                kb.button(text="📚 Открыть каталог", callback_data="m:tests")
-                await message.bot.send_message(
-                    target['tg_id'], congrats,
-                    reply_markup=kb.as_markup(), parse_mode="HTML")
+                congrats += "📚 Откройте каталог тестов в главном меню."
+                kb.button(text="📚 Главное меню", callback_data="m:menu")
+
+            kb.adjust(1)
+            await message.bot.send_message(
+                target['tg_id'], congrats,
+                reply_markup=kb.as_markup(), parse_mode="HTML")
         except Exception as e:
+            log.warning("Premium notify error: %s", e)
             await message.answer(f"⚠️ Premium выдан, но уведомление не дошло: {e}")
 
 
