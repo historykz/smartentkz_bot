@@ -46,6 +46,7 @@ async def cmd_admin_denied(message: Message, user: dict):
 
 
 @router.callback_query(F.data == "m:admin", IsAdmin())
+@router.callback_query(F.data == "adm:menu", IsAdmin())
 async def cb_admin_menu(call: CallbackQuery, state: FSMContext, user: dict):
     await state.clear()
     lang = user.get('language') or 'ru'
@@ -325,18 +326,46 @@ async def cb_admtest(call: CallbackQuery, user: dict):
         return
     qcount = db.fetchone("SELECT COUNT(*) AS c FROM questions WHERE test_id=?", (tid,))['c']
     status_label = t(f"test_status_{test['status']}", lang)
+    is_private = bool(test.get('is_private'))
     text = (f"<b>{utils.escape_html(test['title'])}</b>\n\n"
             f"ID: {test['id']}\n"
             f"Тип: {test['test_type']}\n"
             f"Язык: {test['language']}\n"
             f"Статус: {status_label}\n"
             f"Вопросов: {qcount}\n"
-            f"Платный: {'да' if test['is_paid'] else 'нет'}")
+            f"Платный: {'да' if test['is_paid'] else 'нет'}\n"
+            f"Приватный: {'🔐 ДА' if is_private else 'нет'}")
     try:
-        await call.message.edit_text(text, reply_markup=admin_test_actions_kb(tid, lang))
+        await call.message.edit_text(text, reply_markup=admin_test_actions_kb(tid, lang, is_private=is_private))
     except Exception:
-        await call.message.answer(text, reply_markup=admin_test_actions_kb(tid, lang))
+        await call.message.answer(text, reply_markup=admin_test_actions_kb(tid, lang, is_private=is_private))
     await call.answer()
+
+
+@router.callback_query(F.data.startswith("admpriv:"), IsAdmin())
+async def cb_admpriv(call: CallbackQuery, user: dict):
+    """Переключение приватности теста."""
+    try:
+        parts = call.data.split(":")
+        tid = int(parts[1])
+        new_value = int(parts[2])
+    except (ValueError, IndexError):
+        await call.answer()
+        return
+    test = db.fetchone("SELECT * FROM tests WHERE id=?", (tid,))
+    if not test:
+        await call.answer("Тест не найден.", show_alert=True)
+        return
+    db.execute("UPDATE tests SET is_private=? WHERE id=?", (new_value, tid))
+    if new_value:
+        await call.answer(
+            "✅ Тест теперь ПРИВАТНЫЙ. Видны только тем, кому выдали доступ через /opens",
+            show_alert=True)
+    else:
+        await call.answer("✅ Приватный режим снят. Тест снова публичный.", show_alert=True)
+    # Перерисовываем карточку
+    call.data = f"admtest:{tid}"
+    await cb_admtest(call, user)
 
 
 @router.callback_query(F.data.startswith("admdel:"), IsAdmin())
@@ -1450,8 +1479,9 @@ def _is_super_admin(tg_id: int) -> bool:
 
 
 @router.callback_query(F.data == "adm:admins", IsAdmin())
-async def cb_admins_menu(call: CallbackQuery, user: dict):
+async def cb_admins_menu(call: CallbackQuery, state: FSMContext, user: dict):
     """Меню управления админами."""
+    await state.clear()  # сбрасываем любой залипший FSM
     if not _is_super_admin(call.from_user.id):
         await call.answer(
             "⛔ Управлять админами может только главный администратор "
@@ -1475,13 +1505,19 @@ async def cb_admins_menu(call: CallbackQuery, user: dict):
         "ℹ️ Главный админ (вы) указан в настройках сервера и не может быть "
         "убран отсюда."
     )
-    await call.message.answer(text, reply_markup=kb.as_markup(), parse_mode="HTML")
+    try:
+        await call.message.edit_text(text, reply_markup=kb.as_markup(),
+                                       parse_mode="HTML")
+    except Exception:
+        await call.message.answer(text, reply_markup=kb.as_markup(),
+                                    parse_mode="HTML")
     await call.answer()
 
 
 @router.callback_query(F.data == "adm:admins:list", IsAdmin())
-async def cb_admins_list(call: CallbackQuery, user: dict):
+async def cb_admins_list(call: CallbackQuery, state: FSMContext, user: dict):
     """Список всех админов: и из ADMIN_IDS, и из таблицы admins."""
+    await state.clear()
     if not _is_super_admin(call.from_user.id):
         await call.answer("⛔", show_alert=True)
         return
@@ -1711,3 +1747,21 @@ async def s_admin_remove(message: Message, state: FSMContext, user: dict):
             tg_id, "ℹ️ Ваши права администратора в боте были отозваны.")
     except Exception:
         pass
+
+
+# ============ Fallback для admin callbacks ============
+# Ловит любой adm:* callback который не отловлен выше — снимает «загрузку».
+# Это safety-net чтобы пользователь не висел с «Загрузка...» если хендлер забыли.
+
+@router.callback_query(F.data.startswith("adm:"))
+async def cb_admin_fallback(call: CallbackQuery, state: FSMContext, user: dict):
+    """Если ни один хендлер не отловил adm:* callback."""
+    try:
+        await state.clear()
+    except Exception:
+        pass
+    log.warning("Unhandled admin callback: %s from %s",
+                call.data, call.from_user.id)
+    await call.answer(
+        f"⚠️ Эта функция временно недоступна.\nДанные: {call.data}",
+        show_alert=False)
