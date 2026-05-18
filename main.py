@@ -22,7 +22,8 @@ import config
 import database
 from middlewares import UserContextMiddleware, AntiSpamMiddleware
 from handlers import (common, profile, user, quiz, duel,
-                       homework, rating, inline, admin, group_quiz)
+                       homework, rating, inline, admin, group_quiz,
+                       private_access)
 
 
 def setup_logging() -> None:
@@ -60,6 +61,7 @@ async def set_default_commands(bot: Bot) -> None:
         BotCommand(command="help", description="Помощь"),
         BotCommand(command="cancel", description="Отмена"),
         BotCommand(command="admin", description="Админ-панель"),
+        BotCommand(command="opens", description="Закрытый доступ (admin)"),
     ]
     try:
         await bot.set_my_commands(cmds)
@@ -77,6 +79,14 @@ async def main() -> None:
 
     # БД создаётся на старте автоматически
     database.init_db()
+    log.info("DB_PATH: %s", config.DB_PATH)
+    # Предупреждение если БД лежит в репозитории (не Volume)
+    if not config.DB_PATH.startswith("/data") and not config.DB_PATH.startswith("/mnt"):
+        log.warning(
+            "⚠️ DB_PATH=%s — БД лежит в репозитории и БУДЕТ СТЕРТА при следующем деплое! "
+            "Создай Volume на Railway (Settings → Volumes), смонтируй на /data, "
+            "и поставь переменную DB_PATH=/data/bot.db",
+            config.DB_PATH)
     log.info("База данных инициализирована: %s", config.DB_PATH)
 
     # Обязательный канал — прописываем в required_channels, если задан
@@ -101,6 +111,25 @@ async def main() -> None:
         default=DefaultBotProperties(parse_mode=ParseMode.HTML),
     )
     dp = Dispatcher()
+
+    # Глобальный обработчик ошибок — снимает «загрузку» и не даёт боту падать
+    from aiogram.types import ErrorEvent, CallbackQuery
+    @dp.errors()
+    async def global_error_handler(event: ErrorEvent):
+        log.exception("Unhandled exception: %s", event.exception)
+        # Если ошибка в callback — снимем «загрузку» у юзера
+        try:
+            update = event.update
+            if update and update.callback_query:
+                try:
+                    await update.callback_query.answer(
+                        "⚠️ Произошла ошибка. Попробуйте ещё раз.",
+                        show_alert=False)
+                except Exception:
+                    pass
+        except Exception:
+            pass
+        return True  # ошибка обработана, бот не падает
 
     # Узнаём username бота — нужен для deep-link'ов
     try:
@@ -130,6 +159,7 @@ async def main() -> None:
     dp.include_router(rating.router)
     dp.include_router(inline.router)
     dp.include_router(group_quiz.router)
+    dp.include_router(private_access.router)
     dp.include_router(admin.router)
 
     await set_default_commands(bot)
