@@ -34,11 +34,11 @@ MANAGER_USERNAME: str = os.getenv("MANAGER_USERNAME", "historyentk_bot")
 
 # Канал обязательной подписки (с @ или без; пустая строка = выключено).
 # По умолчанию — @historykazakhkz. Можно переопределить через Railway Variables.
-REQUIRED_CHANNEL: str = os.getenv("REQUIRED_CHANNEL", "@historykazakhkz").strip()
+REQUIRED_CHANNEL: str = os.getenv("REQUIRED_CHANNEL", "@ent_biologydariga").strip()
 
 # Подпись «автор» в карточках теста при шеринге.
 # Не зависит от того, кто реально создал тест — это просто витрина бренда.
-SHARE_AUTHOR_LABEL: str = os.getenv("SHARE_AUTHOR_LABEL", "@historykazakhkz")
+SHARE_AUTHOR_LABEL: str = os.getenv("SHARE_AUTHOR_LABEL", "@ent_biologydariga")
 
 # === База данных ===
 BASE_DIR = Path(__file__).resolve().parent
