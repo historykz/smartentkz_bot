@@ -631,10 +631,23 @@ def init_db() -> None:
             user_tg_id INTEGER NOT NULL,
             granted_by INTEGER,
             granted_at TEXT DEFAULT CURRENT_TIMESTAMP,
+            expires_at TEXT,
+            notified_expired INTEGER DEFAULT 0,
             UNIQUE(test_id, user_tg_id)
         );
         """)
         cur.execute("CREATE INDEX IF NOT EXISTS idx_pta_user ON private_test_access(user_tg_id);")
         cur.execute("CREATE INDEX IF NOT EXISTS idx_pta_test ON private_test_access(test_id);")
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_pta_expires ON private_test_access(expires_at);")
+
+        # Миграции для существующих БД
+        try:
+            cur.execute("ALTER TABLE private_test_access ADD COLUMN expires_at TEXT")
+        except Exception:
+            pass
+        try:
+            cur.execute("ALTER TABLE private_test_access ADD COLUMN notified_expired INTEGER DEFAULT 0")
+        except Exception:
+            pass
 
         logger.info("База данных инициализирована")
