@@ -168,6 +168,10 @@ async def main() -> None:
     from services import premium_service as _ps
     asyncio.create_task(_ps.premium_expiry_loop(bot))
 
+    # Фоновая задача: истечение приватного доступа
+    from handlers import private_access as _pa
+    asyncio.create_task(_pa.expiry_check_loop(bot))
+
     log.info("Запуск polling...")
     try:
         await dp.start_polling(bot, allowed_updates=dp.resolve_used_update_types())
