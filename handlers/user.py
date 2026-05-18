@@ -36,10 +36,12 @@ def _list_active_tests(language: str, ttype_filter: str = None) -> list[dict]:
     if ttype_filter:
         rows = db.fetchall(
             """SELECT * FROM tests WHERE status='active' AND language=? AND test_type=?
+                AND COALESCE(is_private,0)=0
                 ORDER BY id DESC""", (language, ttype_filter))
     else:
         rows = db.fetchall(
             """SELECT * FROM tests WHERE status='active' AND language=?
+                AND COALESCE(is_private,0)=0
                 AND test_type NOT IN ('daily','duel','tournament') ORDER BY id DESC""",
             (language,))
     return [dict(r) for r in rows]
@@ -81,6 +83,18 @@ async def show_test_card(bot: Bot, chat_id: int, user_tg_id: int, test_id: int, 
         await bot.send_message(chat_id, t("test_not_found", lang),
                                reply_markup=back_kb(lang, "m:tests"))
         return
+
+    # Приватный тест — проверка доступа
+    if test.get('is_private'):
+        from handlers import private_access as _pa
+        if not _pa.user_has_private_access(test['id'], user_tg_id):
+            await bot.send_message(
+                chat_id,
+                "❌ <b>Тест не найден или у вас нет к нему доступа.</b>\n\n"
+                "Возможно, тест приватный — обратитесь к администратору, "
+                "если считаете, что доступ должен быть.",
+                reply_markup=back_kb(lang, "m:tests"), parse_mode="HTML")
+            return
 
     user = utils.get_user_by_tg(user_tg_id)
     has_access = utils.has_paid_access(user['id'], test_id=test['id']) if user else False
