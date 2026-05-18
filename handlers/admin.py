@@ -24,7 +24,8 @@ from keyboards import (admin_menu_kb, admin_lang_kb, test_type_kb,
                         cancel_kb)
 from states import (TestCreateStates, TextImportStates, PollImportStates,
                      GrantAccessStates, PremiumStates, BlockStates,
-                     ChannelStates, NoteCreateStates, DraftFixStates)
+                     ChannelStates, NoteCreateStates, DraftFixStates,
+                     AdminMgmtStates)
 from services import (text_import_service, quiz_importer, notes_service)
 
 router = Router(name="admin")
@@ -1438,3 +1439,275 @@ async def cb_export_results(call: CallbackQuery, user: dict):
         ),
         parse_mode="HTML")
     await call.answer()
+
+
+# ============ Управление админами ============
+
+def _is_super_admin(tg_id: int) -> bool:
+    """Супер-админ = указанный в переменной ADMIN_IDS (config.py).
+    Только супер-админ может добавлять/удалять других админов."""
+    return tg_id in (config.ADMIN_IDS or [])
+
+
+@router.callback_query(F.data == "adm:admins", IsAdmin())
+async def cb_admins_menu(call: CallbackQuery, user: dict):
+    """Меню управления админами."""
+    if not _is_super_admin(call.from_user.id):
+        await call.answer(
+            "⛔ Управлять админами может только главный администратор "
+            "(указанный в настройках сервера).",
+            show_alert=True)
+        return
+
+    from aiogram.utils.keyboard import InlineKeyboardBuilder
+    kb = InlineKeyboardBuilder()
+    kb.button(text="➕ Добавить админа", callback_data="adm:admins:add")
+    kb.button(text="📋 Список админов", callback_data="adm:admins:list")
+    kb.button(text="🗑 Убрать админа", callback_data="adm:admins:remove")
+    kb.button(text="↩️ Назад", callback_data="adm:menu")
+    kb.adjust(1)
+
+    text = (
+        "🛠 <b>Управление администраторами</b>\n\n"
+        "Здесь можно выдавать и забирать админ-доступ другим пользователям. "
+        "У всех админов одинаковые права: создание тестов, выдача Premium, "
+        "запуск тестов в группах, статистика и т.д.\n\n"
+        "ℹ️ Главный админ (вы) указан в настройках сервера и не может быть "
+        "убран отсюда."
+    )
+    await call.message.answer(text, reply_markup=kb.as_markup(), parse_mode="HTML")
+    await call.answer()
+
+
+@router.callback_query(F.data == "adm:admins:list", IsAdmin())
+async def cb_admins_list(call: CallbackQuery, user: dict):
+    """Список всех админов: и из ADMIN_IDS, и из таблицы admins."""
+    if not _is_super_admin(call.from_user.id):
+        await call.answer("⛔", show_alert=True)
+        return
+
+    lines = ["🛠 <b>Список администраторов</b>\n"]
+
+    # Супер-админы из ADMIN_IDS
+    lines.append("👑 <b>Главные (из настроек сервера):</b>")
+    if config.ADMIN_IDS:
+        for tg_id in config.ADMIN_IDS:
+            # Попробуем найти username/имя
+            u = db.fetchone(
+                "SELECT username, first_name FROM users WHERE tg_id=?", (tg_id,))
+            label = f"<code>{tg_id}</code>"
+            if u:
+                if u['username']:
+                    label = f"@{u['username']} ({tg_id})"
+                elif u['first_name']:
+                    label = f"{u['first_name']} ({tg_id})"
+            lines.append(f"  • {label}")
+    else:
+        lines.append("  <i>(нет)</i>")
+
+    # Рантайм-админы из таблицы
+    rows = db.fetchall(
+        """SELECT a.tg_id, a.granted_by, a.created_at, u.username, u.first_name
+           FROM admins a
+           LEFT JOIN users u ON u.tg_id = a.tg_id
+           ORDER BY a.created_at DESC""")
+    lines.append("\n🛠 <b>Добавленные через бот:</b>")
+    if rows:
+        for r in rows:
+            label = f"<code>{r['tg_id']}</code>"
+            if r['username']:
+                label = f"@{r['username']} ({r['tg_id']})"
+            elif r['first_name']:
+                label = f"{r['first_name']} ({r['tg_id']})"
+            date = (r['created_at'] or "")[:10]
+            lines.append(f"  • {label}  <i>· {date}</i>")
+    else:
+        lines.append("  <i>(никого пока не добавляли)</i>")
+
+    from aiogram.utils.keyboard import InlineKeyboardBuilder
+    kb = InlineKeyboardBuilder()
+    kb.button(text="↩️ Назад", callback_data="adm:admins")
+    kb.adjust(1)
+
+    await call.message.answer("\n".join(lines),
+                                reply_markup=kb.as_markup(), parse_mode="HTML")
+    await call.answer()
+
+
+@router.callback_query(F.data == "adm:admins:add", IsAdmin())
+async def cb_admins_add(call: CallbackQuery, state: FSMContext, user: dict):
+    """Начало добавления админа."""
+    if not _is_super_admin(call.from_user.id):
+        await call.answer("⛔", show_alert=True)
+        return
+    await state.set_state(AdminMgmtStates.waiting_add_user)
+    await call.message.answer(
+        "👤 Введите <b>@username</b> или <b>tg_id</b> пользователя, "
+        "которому хотите дать админ-права.\n\n"
+        "ℹ️ Пользователь должен <b>хотя бы раз написать</b> боту (/start), "
+        "иначе мы не сможем его найти.",
+        parse_mode="HTML")
+    await call.answer()
+
+
+@router.message(AdminMgmtStates.waiting_add_user, IsAdmin())
+async def s_admin_add(message: Message, state: FSMContext, user: dict):
+    if not _is_super_admin(message.from_user.id):
+        await state.clear()
+        return
+    arg = (message.text or "").strip()
+    target = utils.find_user_by_arg(arg)
+    if not target:
+        # Если ввели чистый tg_id — добавим даже если нет в users
+        if arg.isdigit():
+            tg_id = int(arg)
+            existing_admin = db.fetchone(
+                "SELECT id FROM admins WHERE tg_id=?", (tg_id,))
+            if existing_admin:
+                await message.answer(
+                    f"ℹ️ Пользователь с tg_id <code>{tg_id}</code> уже админ.",
+                    parse_mode="HTML")
+                await state.clear()
+                return
+            if tg_id in (config.ADMIN_IDS or []):
+                await message.answer(
+                    f"ℹ️ <code>{tg_id}</code> уже главный админ (из настроек сервера).",
+                    parse_mode="HTML")
+                await state.clear()
+                return
+            db.execute(
+                "INSERT INTO admins (tg_id, granted_by) VALUES (?,?)",
+                (tg_id, message.from_user.id))
+            await message.answer(
+                f"✅ Админ-права выданы по tg_id <code>{tg_id}</code>.\n\n"
+                f"⚠️ Пользователь не писал боту — мы не знаем его @username. "
+                f"После того как он напишет /start, его данные подтянутся.",
+                parse_mode="HTML",
+                reply_markup=admin_menu_kb(user.get('language') or 'ru'))
+            await state.clear()
+            # Попробуем уведомить
+            try:
+                await message.bot.send_message(
+                    tg_id,
+                    "🎉 <b>Вам выдали права администратора в боте!</b>\n\n"
+                    "Откройте админ-панель командой /admin",
+                    parse_mode="HTML")
+            except Exception:
+                pass
+            return
+
+        await message.answer(
+            "❌ Пользователь не найден.\n"
+            "Убедитесь что он написал боту /start, "
+            "либо введите его tg_id числом.")
+        return
+
+    # Пользователь найден в users
+    if target['tg_id'] in (config.ADMIN_IDS or []):
+        await message.answer(
+            f"ℹ️ Этот пользователь уже главный админ (из настроек сервера).")
+        await state.clear()
+        return
+
+    existing = db.fetchone(
+        "SELECT id FROM admins WHERE tg_id=?", (target['tg_id'],))
+    if existing:
+        await message.answer(
+            f"ℹ️ Пользователь уже админ.")
+        await state.clear()
+        return
+
+    db.execute(
+        "INSERT INTO admins (tg_id, granted_by) VALUES (?,?)",
+        (target['tg_id'], message.from_user.id))
+
+    uname = ("@" + target['username']) if target.get('username') else (
+        target.get('first_name') or f"id{target['tg_id']}")
+    await message.answer(
+        f"✅ <b>{utils.escape_html(uname)}</b> теперь администратор бота.\n"
+        f"tg_id: <code>{target['tg_id']}</code>\n\n"
+        f"Уведомление отправлено пользователю.",
+        parse_mode="HTML",
+        reply_markup=admin_menu_kb(user.get('language') or 'ru'))
+    await state.clear()
+
+    # Уведомление новому админу
+    try:
+        await message.bot.send_message(
+            target['tg_id'],
+            "🎉 <b>Вам выдали права администратора в боте!</b>\n\n"
+            "Теперь вы можете:\n"
+            "• Создавать тесты\n"
+            "• Импортировать вопросы\n"
+            "• Выдавать Premium-доступ\n"
+            "• Запускать тесты в группах\n"
+            "• Смотреть статистику\n"
+            "• И многое другое\n\n"
+            "Откройте админ-панель командой /admin",
+            parse_mode="HTML")
+    except Exception:
+        pass
+
+
+@router.callback_query(F.data == "adm:admins:remove", IsAdmin())
+async def cb_admins_remove(call: CallbackQuery, state: FSMContext, user: dict):
+    """Начало удаления админа."""
+    if not _is_super_admin(call.from_user.id):
+        await call.answer("⛔", show_alert=True)
+        return
+    await state.set_state(AdminMgmtStates.waiting_remove_user)
+    await call.message.answer(
+        "🗑 Введите <b>@username</b> или <b>tg_id</b> админа, "
+        "которого хотите убрать.\n\n"
+        "ℹ️ Главных админов (из настроек сервера) убрать нельзя.",
+        parse_mode="HTML")
+    await call.answer()
+
+
+@router.message(AdminMgmtStates.waiting_remove_user, IsAdmin())
+async def s_admin_remove(message: Message, state: FSMContext, user: dict):
+    if not _is_super_admin(message.from_user.id):
+        await state.clear()
+        return
+    arg = (message.text or "").strip()
+
+    tg_id = None
+    if arg.isdigit():
+        tg_id = int(arg)
+    else:
+        target = utils.find_user_by_arg(arg)
+        if target:
+            tg_id = target['tg_id']
+
+    if tg_id is None:
+        await message.answer("❌ Не нашёл такого пользователя.")
+        return
+
+    if tg_id in (config.ADMIN_IDS or []):
+        await message.answer(
+            "⛔ Это главный админ (из настроек сервера) — его нельзя убрать здесь. "
+            "Удалите его из переменной ADMIN_IDS на Railway.")
+        await state.clear()
+        return
+
+    existing = db.fetchone(
+        "SELECT id FROM admins WHERE tg_id=?", (tg_id,))
+    if not existing:
+        await message.answer(
+            f"ℹ️ Пользователь <code>{tg_id}</code> и так не админ.",
+            parse_mode="HTML")
+        await state.clear()
+        return
+
+    db.execute("DELETE FROM admins WHERE tg_id=?", (tg_id,))
+    await message.answer(
+        f"✅ Админ-права у <code>{tg_id}</code> убраны.",
+        parse_mode="HTML",
+        reply_markup=admin_menu_kb(user.get('language') or 'ru'))
+    await state.clear()
+
+    try:
+        await message.bot.send_message(
+            tg_id, "ℹ️ Ваши права администратора в боте были отозваны.")
+    except Exception:
+        pass
