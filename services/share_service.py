@@ -106,9 +106,12 @@ def build_test_card(test: dict, bot_username: str = None,
 
     # Админ-кнопки (только в личке)
     if in_bot and viewer_is_admin:
+        # "Отправить в группу" → нативный share-picker через switch_inline_query
+        # Префикс grp: → inline возвращает результат, который Telegram
+        # отправит в выбранный чат с кнопкой "Запустить тест" для админа
         rows.append([InlineKeyboardButton(
             text="📤 Отправить в группу",
-            callback_data=f"groupsend:{test_id}",
+            switch_inline_query=f"grp:{test_id}",
         )])
         rows.append([InlineKeyboardButton(
             text="📊 Статистика",
@@ -151,6 +154,49 @@ def _build_inline_card(test: dict, bot_username: str) -> InlineQueryResultArticl
     )
 
 
+def _build_group_launch_card(test: dict, bot_username: str,
+                              admin_tg_id: int) -> InlineQueryResultArticle:
+    """
+    Карточка для запуска теста в группе.
+    Когда админ выбирает чат — Telegram отправит это сообщение в группу.
+    Кнопка «🚀 Запустить тест» проверит, что нажавший = админ бота.
+    """
+    qcount_row = db.fetchone(
+        "SELECT COUNT(*) AS c FROM questions WHERE test_id=?", (test["id"],)
+    )
+    qcount = qcount_row["c"] if qcount_row else 0
+    title = utils.escape_html(test.get("title") or "—")
+    author = utils.escape_html(_author_label(test))
+    time_per_q = test.get("time_per_question") or 30
+
+    text = (
+        f"🎲 <b>Тест «{title}»</b> готов к запуску\n\n"
+        f"👤 Автор: {author}\n"
+        f"📚 {qcount} вопросов · ⏱ {time_per_q} сек\n\n"
+        f"Нажмите <b>«🚀 Запустить тест»</b> чтобы начать. "
+        f"Запустить может только администратор бота. "
+        f"Когда наберутся ≥2 игроков — тест начнётся автоматически."
+    )
+
+    kb = InlineKeyboardMarkup(inline_keyboard=[[
+        InlineKeyboardButton(
+            text="🚀 Запустить тест в этом чате",
+            callback_data=f"gqlaunch:{test['id']}:{admin_tg_id}",
+        )
+    ]])
+
+    return InlineQueryResultArticle(
+        id=f"grp_{test['id']}",
+        title=f"📤 Запустить «{test.get('title') or 'тест'}» в чате",
+        description=f"Только для админа · {qcount} вопросов",
+        input_message_content=InputTextMessageContent(
+            message_text=text,
+            parse_mode="HTML",
+        ),
+        reply_markup=kb,
+    )
+
+
 def _fetch_test(test_id: int) -> Optional[dict]:
     row = db.fetchone(
         "SELECT * FROM tests WHERE id=? AND status='active'", (test_id,))
@@ -158,19 +204,33 @@ def _fetch_test(test_id: int) -> Optional[dict]:
 
 
 def build_inline_results(query: str, user_lang: Optional[str],
-                         bot_username: str = None) -> list[InlineQueryResultArticle]:
+                         bot_username: str = None,
+                         user_tg_id: Optional[int] = None) -> list[InlineQueryResultArticle]:
     """
     Возвращает результаты для inline-режима.
 
     Поддерживаемые форматы query:
-        "test:<id>"      — конкретный тест по ID
+        "test:<id>"      — конкретный тест (карточка для шеринга друзьям)
+        "grp:<id>"       — спец-карточка для запуска теста в группе (только для админов)
         "<search text>"  — поиск по title/subject
         ""               — последние 30 активных
     """
     bu = bot_username or config.BOT_USERNAME or "bot"
     q = (query or "").strip()
 
-    # 1) Точечный шеринг через switch_inline_query
+    # 1) Спец-режим: запуск в группе — только админ
+    if q.lower().startswith("grp:"):
+        rest = q.split(":", 1)[1].strip()
+        if not rest.isdigit():
+            return []
+        if user_tg_id is None or user_tg_id not in (config.ADMIN_IDS or []):
+            return []  # не админ — пусто
+        test = _fetch_test(int(rest))
+        if not test:
+            return []
+        return [_build_group_launch_card(test, bu, user_tg_id)]
+
+    # 2) Точечный шеринг через switch_inline_query
     if q.lower().startswith("test:"):
         rest = q.split(":", 1)[1].strip()
         if rest.isdigit():
