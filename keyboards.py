@@ -344,6 +344,7 @@ def admin_menu_kb(lang: str) -> InlineKeyboardMarkup:
     kb.button(text=t("btn_admin_notes", lang), callback_data="adm:notes")
     kb.button(text=t("btn_admin_stats", lang), callback_data="adm:stats")
     kb.button(text=t("btn_admin_export", lang), callback_data="adm:export")
+    kb.button(text="🛠 Управление админами", callback_data="adm:admins")
     kb.button(text=t("btn_back", lang), callback_data="m:menu")
     kb.adjust(2)
     return kb.as_markup()
