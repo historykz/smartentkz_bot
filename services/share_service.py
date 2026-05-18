@@ -231,12 +231,14 @@ def build_inline_results(query: str, user_lang: Optional[str],
         if user_lang:
             rows = db.fetchall(
                 """SELECT * FROM tests WHERE status='active' AND language=?
+                    AND COALESCE(is_private,0)=0
                     AND (LOWER(title) LIKE ? OR LOWER(subject) LIKE ?)
                     ORDER BY id DESC LIMIT 30""",
                 (user_lang, f"%{qlower}%", f"%{qlower}%"))
         else:
             rows = db.fetchall(
                 """SELECT * FROM tests WHERE status='active'
+                    AND COALESCE(is_private,0)=0
                     AND (LOWER(title) LIKE ? OR LOWER(subject) LIKE ?)
                     ORDER BY id DESC LIMIT 30""",
                 (f"%{qlower}%", f"%{qlower}%"))
@@ -244,11 +246,13 @@ def build_inline_results(query: str, user_lang: Optional[str],
         if user_lang:
             rows = db.fetchall(
                 "SELECT * FROM tests WHERE status='active' AND language=? "
+                "AND COALESCE(is_private,0)=0 "
                 "ORDER BY id DESC LIMIT 30",
                 (user_lang,))
         else:
             rows = db.fetchall(
                 "SELECT * FROM tests WHERE status='active' "
+                "AND COALESCE(is_private,0)=0 "
                 "ORDER BY id DESC LIMIT 30"
             )
 
