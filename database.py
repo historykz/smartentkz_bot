@@ -618,4 +618,23 @@ def init_db() -> None:
         except Exception:
             pass
 
+        try:
+            cur.execute("ALTER TABLE tests ADD COLUMN is_private INTEGER DEFAULT 0")
+        except Exception:
+            pass
+
+        # --- ПРИВАТНЫЙ ДОСТУП К ТЕСТАМ ---
+        cur.execute("""
+        CREATE TABLE IF NOT EXISTS private_test_access (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            test_id INTEGER NOT NULL,
+            user_tg_id INTEGER NOT NULL,
+            granted_by INTEGER,
+            granted_at TEXT DEFAULT CURRENT_TIMESTAMP,
+            UNIQUE(test_id, user_tg_id)
+        );
+        """)
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_pta_user ON private_test_access(user_tg_id);")
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_pta_test ON private_test_access(test_id);")
+
         logger.info("База данных инициализирована")
