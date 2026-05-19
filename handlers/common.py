@@ -29,6 +29,48 @@ async def cmd_start_deep(message: Message, command: CommandObject, state: FSMCon
     arg = (command.args or "").strip()
     lang = _resolve_lang(user)
 
+    # === Запуск теста в группе (через ?startgroup=launch_X) ===
+    if arg.startswith("launch_") and message.chat.type in ("group", "supergroup"):
+        try:
+            test_id = int(arg[7:])
+        except ValueError:
+            return
+        # Проверяем что добавивший — админ
+        import utils as _utils
+        if not _utils.is_admin(message.from_user.id):
+            try:
+                await message.reply("⛔ Запустить тест может только администратор бота.")
+            except Exception:
+                pass
+            return
+        # Запускаем тест в этой группе
+        from services import test_runner, group_quiz_service
+        import database as _db
+        test = test_runner.get_test(test_id)
+        if not test:
+            try:
+                await message.reply("❌ Тест не найден.")
+            except Exception:
+                pass
+            return
+        # Записываем группу
+        _db.execute(
+            """INSERT OR IGNORE INTO known_groups (chat_id, title, type, added_by, seen_at)
+               VALUES (?,?,?,?, CURRENT_TIMESTAMP)""",
+            (message.chat.id, message.chat.title or "",
+             message.chat.type, message.from_user.id))
+        ok, key, gq_id = await group_quiz_service.start_lobby(
+            message.bot, dict(test), message.chat.id, message.from_user.id)
+        if not ok:
+            try:
+                if key == "already_running":
+                    await message.reply("⚠️ В этой группе уже идёт тест. Сначала /stop.")
+                else:
+                    await message.reply(f"❌ Не удалось запустить: {key}")
+            except Exception:
+                pass
+        return
+
     # Сохраняем приглашение в state для применения после выбора языка
     pending = {}
     if arg.startswith("ref_"):
@@ -63,6 +105,16 @@ async def cmd_start_deep(message: Message, command: CommandObject, state: FSMCon
 async def cmd_start(message: Message, state: FSMContext, user: dict):
     await state.clear()
     lang = _resolve_lang(user)
+    # В группах не показываем главное меню
+    if message.chat.type in ("group", "supergroup"):
+        try:
+            await message.reply(
+                "👋 Бот добавлен в группу. Для запуска теста админ может "
+                "использовать команду /launch_&lt;test_id&gt;",
+                parse_mode="HTML")
+        except Exception:
+            pass
+        return
     if not user.get('language'):
         await message.answer(t("choose_language", lang), reply_markup=language_kb())
         await state.set_state(CommonStates.choosing_language)
