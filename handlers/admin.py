@@ -64,6 +64,7 @@ async def cb_admin_menu(call: CallbackQuery, state: FSMContext, user: dict):
 @router.callback_query(F.data == "adm:create_test", IsAdmin())
 async def cb_create_test(call: CallbackQuery, state: FSMContext, user: dict):
     lang = user.get('language') or 'ru'
+    await state.clear()
     await state.set_state(TestCreateStates.title)
     await call.message.answer(t("ask_test_title", lang), reply_markup=cancel_kb(lang))
     await call.answer()
@@ -73,43 +74,7 @@ async def cb_create_test(call: CallbackQuery, state: FSMContext, user: dict):
 async def s_title(message: Message, state: FSMContext, user: dict):
     lang = user.get('language') or 'ru'
     await state.update_data(title=message.text.strip()[:200])
-    await state.set_state(TestCreateStates.description)
-    await message.answer(t("ask_test_description", lang), reply_markup=cancel_kb(lang))
-
-
-@router.message(TestCreateStates.description, IsAdmin())
-async def s_descr(message: Message, state: FSMContext, user: dict):
-    lang = user.get('language') or 'ru'
-    await state.update_data(description=message.text.strip()[:1000])
-    await state.set_state(TestCreateStates.subject)
-    await message.answer(t("ask_test_subject", lang))
-
-
-@router.message(TestCreateStates.subject, IsAdmin())
-async def s_subject(message: Message, state: FSMContext, user: dict):
-    lang = user.get('language') or 'ru'
-    await state.update_data(subject=message.text.strip()[:100])
-    await state.set_state(TestCreateStates.grade)
-    await message.answer(t("ask_test_grade", lang))
-
-
-@router.message(TestCreateStates.grade, IsAdmin())
-async def s_grade(message: Message, state: FSMContext, user: dict):
-    lang = user.get('language') or 'ru'
-    grade = message.text.strip()
-    if grade.isdigit():
-        grade = int(grade)
-    else:
-        grade = 0
-    await state.update_data(grade=grade)
-    await state.set_state(TestCreateStates.category)
-    await message.answer(t("ask_test_category", lang))
-
-
-@router.message(TestCreateStates.category, IsAdmin())
-async def s_category(message: Message, state: FSMContext, user: dict):
-    lang = user.get('language') or 'ru'
-    await state.update_data(category=message.text.strip()[:100])
+    # Сразу спрашиваем язык — описание, предмет, класс, категория, тип пропускаем
     await state.set_state(TestCreateStates.language)
     await message.answer(t("ask_test_lang", lang), reply_markup=admin_lang_kb("newtest_lang"))
 
@@ -119,56 +84,54 @@ async def s_language(call: CallbackQuery, state: FSMContext, user: dict):
     lang = user.get('language') or 'ru'
     tl = call.data.split(":")[1]
     await state.update_data(language=tl)
-    await state.set_state(TestCreateStates.test_type)
-    await call.message.answer(t("ask_test_type", lang), reply_markup=test_type_kb())
+    # Кнопки времени
+    await state.set_state(TestCreateStates.time_per_question)
+    kb = InlineKeyboardBuilder()
+    kb.button(text="⏱ 30 сек", callback_data="newtime:30")
+    kb.button(text="⏱ 45 сек", callback_data="newtime:45")
+    kb.button(text="⏱ 60 сек", callback_data="newtime:60")
+    kb.button(text="⏱ 5 мин", callback_data="newtime:300")
+    kb.button(text="✏️ Вручную", callback_data="newtime:custom")
+    kb.button(text=t("btn_cancel", lang), callback_data="cancel")
+    kb.adjust(2)
+    await call.message.answer("⏱ Сколько секунд на каждый вопрос?",
+                                reply_markup=kb.as_markup())
     await call.answer()
 
 
-@router.callback_query(TestCreateStates.test_type, F.data.startswith("newtest_type:"), IsAdmin())
-async def s_test_type(call: CallbackQuery, state: FSMContext, user: dict):
+@router.callback_query(TestCreateStates.time_per_question, F.data.startswith("newtime:"), IsAdmin())
+async def s_time_btn(call: CallbackQuery, state: FSMContext, user: dict):
     lang = user.get('language') or 'ru'
-    tt = call.data.split(":")[1]
-    await state.update_data(test_type=tt)
-    await state.set_state(TestCreateStates.time_per_question)
-    await call.message.answer(t("ask_test_time_per_q", lang))
+    arg = call.data.split(":")[1]
+    if arg == "custom":
+        await call.message.answer("Введите количество секунд (5–600):",
+                                    reply_markup=cancel_kb(lang))
+        await call.answer()
+        return
+    try:
+        tpq = max(5, min(600, int(arg)))
+    except ValueError:
+        tpq = config.DEFAULT_TIME_PER_QUESTION
+    await state.update_data(time_per_question=tpq)
+    await _ask_paid(call.message, state, lang)
     await call.answer()
 
 
 @router.message(TestCreateStates.time_per_question, IsAdmin())
-async def s_time(message: Message, state: FSMContext, user: dict):
+async def s_time_manual(message: Message, state: FSMContext, user: dict):
     lang = user.get('language') or 'ru'
     try:
         tpq = max(5, min(600, int(message.text.strip())))
     except ValueError:
         tpq = config.DEFAULT_TIME_PER_QUESTION
     await state.update_data(time_per_question=tpq)
-    await state.set_state(TestCreateStates.attempts_limit)
-    await message.answer(t("ask_test_attempts", lang))
+    await _ask_paid(message, state, lang)
 
 
-@router.message(TestCreateStates.attempts_limit, IsAdmin())
-async def s_attempts(message: Message, state: FSMContext, user: dict):
-    lang = user.get('language') or 'ru'
-    txt = message.text.strip()
-    try:
-        al = int(txt)
-        if al <= 0:
-            al = None
-    except ValueError:
-        al = None
-    await state.update_data(attempts_limit=al)
-    await state.set_state(TestCreateStates.first_attempt_only)
-    await message.answer(t("ask_test_first_only", lang), reply_markup=yes_no_kb("newtest_first", lang))
-
-
-@router.callback_query(TestCreateStates.first_attempt_only, F.data.startswith("newtest_first:"), IsAdmin())
-async def s_first(call: CallbackQuery, state: FSMContext, user: dict):
-    lang = user.get('language') or 'ru'
-    val = call.data.split(":")[1] == "1"
-    await state.update_data(first_attempt_only=val)
+async def _ask_paid(msg, state: FSMContext, lang: str):
     await state.set_state(TestCreateStates.is_paid)
-    await call.message.answer(t("ask_test_paid", lang), reply_markup=yes_no_kb("newtest_paid", lang))
-    await call.answer()
+    await msg.answer(t("ask_test_paid", lang),
+                       reply_markup=yes_no_kb("newtest_paid", lang))
 
 
 @router.callback_query(TestCreateStates.is_paid, F.data.startswith("newtest_paid:"), IsAdmin())
@@ -181,9 +144,8 @@ async def s_paid(call: CallbackQuery, state: FSMContext, user: dict):
         await call.message.answer(t("ask_test_price", lang))
     else:
         await state.update_data(price=0)
-        await state.set_state(TestCreateStates.shuffle_questions)
-        await call.message.answer(t("ask_test_shuffle_q", lang),
-                                  reply_markup=yes_no_kb("newtest_shufq", lang))
+        # Всё, финализируем — остальные настройки берём по умолчанию
+        await _finish_create_test(call.bot, call.message.chat.id, state, user)
     await call.answer()
 
 
@@ -195,98 +157,45 @@ async def s_price(message: Message, state: FSMContext, user: dict):
     except ValueError:
         p = 0
     await state.update_data(price=p)
-    await state.set_state(TestCreateStates.shuffle_questions)
-    await message.answer(t("ask_test_shuffle_q", lang), reply_markup=yes_no_kb("newtest_shufq", lang))
-
-
-@router.callback_query(TestCreateStates.shuffle_questions, F.data.startswith("newtest_shufq:"), IsAdmin())
-async def s_shufq(call: CallbackQuery, state: FSMContext, user: dict):
-    lang = user.get('language') or 'ru'
-    val = call.data.split(":")[1] == "1"
-    await state.update_data(shuffle_questions=val)
-    await state.set_state(TestCreateStates.shuffle_options)
-    await call.message.answer(t("ask_test_shuffle_o", lang),
-                              reply_markup=yes_no_kb("newtest_shufo", lang))
-    await call.answer()
-
-
-@router.callback_query(TestCreateStates.shuffle_options, F.data.startswith("newtest_shufo:"), IsAdmin())
-async def s_shufo(call: CallbackQuery, state: FSMContext, user: dict):
-    lang = user.get('language') or 'ru'
-    val = call.data.split(":")[1] == "1"
-    await state.update_data(shuffle_options=val)
-    await state.set_state(TestCreateStates.show_correct)
-    await call.message.answer(t("ask_test_show_answers", lang),
-                              reply_markup=yes_no_kb("newtest_showa", lang))
-    await call.answer()
-
-
-@router.callback_query(TestCreateStates.show_correct, F.data.startswith("newtest_showa:"), IsAdmin())
-async def s_showa(call: CallbackQuery, state: FSMContext, user: dict):
-    lang = user.get('language') or 'ru'
-    val = call.data.split(":")[1] == "1"
-    await state.update_data(show_correct=val)
-    await state.set_state(TestCreateStates.show_explanation)
-    await call.message.answer(t("ask_test_show_explain", lang),
-                              reply_markup=yes_no_kb("newtest_showe", lang))
-    await call.answer()
-
-
-@router.callback_query(TestCreateStates.show_explanation, F.data.startswith("newtest_showe:"), IsAdmin())
-async def s_showe(call: CallbackQuery, state: FSMContext, user: dict):
-    lang = user.get('language') or 'ru'
-    val = call.data.split(":")[1] == "1"
-    await state.update_data(show_explanation=val)
-    await state.set_state(TestCreateStates.required_channel)
-    kb = InlineKeyboardBuilder()
-    kb.button(text=t("btn_skip", lang), callback_data="newtest_chskip")
-    kb.button(text=t("btn_cancel", lang), callback_data="cancel")
-    kb.adjust(1)
-    await call.message.answer(t("ask_test_channel", lang), reply_markup=kb.as_markup())
-    await call.answer()
-
-
-@router.callback_query(TestCreateStates.required_channel, F.data == "newtest_chskip", IsAdmin())
-async def s_channel_skip(call: CallbackQuery, state: FSMContext, user: dict):
-    await state.update_data(required_channel=None)
-    await _finish_create_test(call.bot, call.message.chat.id, state, user)
-    await call.answer()
-
-
-@router.message(TestCreateStates.required_channel, IsAdmin())
-async def s_channel(message: Message, state: FSMContext, user: dict):
-    ch = message.text.strip()
-    if not ch.startswith("@"):
-        ch = "@" + ch.lstrip("@")
-    await state.update_data(required_channel=ch)
     await _finish_create_test(message.bot, message.chat.id, state, user)
 
 
 async def _finish_create_test(bot: Bot, chat_id: int, state: FSMContext, user: dict):
     lang = user.get('language') or 'ru'
     data = await state.get_data()
+    # Применяем дефолты для всего что не спрашивали
+    data.setdefault('description', '')
+    data.setdefault('subject', '')
+    data.setdefault('grade', 0)
+    data.setdefault('category', '')
+    data.setdefault('test_type', 'regular')  # обычный тест
+    data.setdefault('attempts_limit', None)
+    data.setdefault('first_attempt_only', True)   # ← по умолчанию ДА
+    data.setdefault('shuffle_questions', True)    # ← по умолчанию ДА
+    data.setdefault('shuffle_options', True)      # ← по умолчанию ДА
+    data.setdefault('show_correct', False)        # ← по умолчанию НЕТ
+    data.setdefault('show_explanation', False)    # ← по умолчанию НЕТ
+    data.setdefault('required_channel', None)
+    data.setdefault('is_paid', False)
+    data.setdefault('price', 0)
     db.execute(
         """INSERT INTO tests
            (title, description, subject, grade, category, language, test_type,
             time_per_question, attempts_limit, first_attempt_only, is_paid, price,
             shuffle_questions, shuffle_options, show_correct, show_explanation,
-            required_channel, status, allow_in_group, allow_daily, allow_duel,
-            allow_tournament, display_mode, created_by, created_at)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'active',
-                   1, 0, 0, 0, 'inline', ?, ?)""",
-        (data.get('title'), data.get('description'), data.get('subject'),
-         data.get('grade', 0), data.get('category'), data.get('language', 'ru'),
-         data.get('test_type', 'regular'),
-         data.get('time_per_question', config.DEFAULT_TIME_PER_QUESTION),
-         data.get('attempts_limit'),
-         1 if data.get('first_attempt_only') else 0,
-         1 if data.get('is_paid') else 0,
-         data.get('price', 0),
-         1 if data.get('shuffle_questions') else 0,
-         1 if data.get('shuffle_options') else 0,
-         1 if data.get('show_correct') else 0,
-         1 if data.get('show_explanation') else 0,
-         data.get('required_channel'),
+            required_channel, allow_duel, status, created_by, created_at)
+           VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,1,'active',?,?)""",
+        (
+         data['title'], data['description'], data['subject'], data['grade'],
+         data['category'], data['language'], data['test_type'],
+         data['time_per_question'], data['attempts_limit'],
+         1 if data['first_attempt_only'] else 0,
+         1 if data['is_paid'] else 0, data['price'],
+         1 if data['shuffle_questions'] else 0,
+         1 if data['shuffle_options'] else 0,
+         1 if data['show_correct'] else 0,
+         1 if data['show_explanation'] else 0,
+         data['required_channel'],
          user['id'], utils.now_iso())
     )
     test_id = db.fetchone("SELECT last_insert_rowid() AS id")['id']
@@ -314,61 +223,102 @@ async def cb_my_tests(call: CallbackQuery, user: dict):
 
 @router.callback_query(F.data.startswith("admtest:"), IsAdmin())
 async def cb_admtest(call: CallbackQuery, user: dict):
-    lang = user.get('language') or 'ru'
+    """Карточка теста для админа. Crash-proof."""
+    lang = (user or {}).get('language') or 'ru'
     try:
         tid = int(call.data.split(":")[1])
     except (ValueError, IndexError):
         await call.answer()
         return
+
+    # Получаем тест
+    test_dict = {}
     try:
-        test = db.fetchone("SELECT * FROM tests WHERE id=?", (tid,))
+        row = db.fetchone("SELECT * FROM tests WHERE id=?", (tid,))
+        if row:
+            test_dict = dict(row)
     except Exception as e:
         log.warning("admtest fetch error: %s", e)
-        await call.answer(f"⚠️ Ошибка БД: {e}", show_alert=True)
+
+    if not test_dict:
+        await call.answer("⚠️ Тест не найден.", show_alert=True)
         return
-    if not test:
-        await call.answer(t("test_not_found", lang), show_alert=True)
-        return
 
+    # Подсчёт вопросов
+    qcount = 0
     try:
-        qcount_row = db.fetchone("SELECT COUNT(*) AS c FROM questions WHERE test_id=?", (tid,))
-        qcount = qcount_row['c'] if qcount_row else 0
+        r = db.fetchone("SELECT COUNT(*) AS c FROM questions WHERE test_id=?", (tid,))
+        qcount = (r and r['c']) or 0
     except Exception:
-        qcount = 0
+        pass
 
+    # Статус (перевод не обязателен)
+    status_raw = test_dict.get('status') or 'unknown'
+    status_label = status_raw
     try:
-        status_label = t(f"test_status_{test['status']}", lang)
+        from locales import t as _t
+        translated = _t(f"test_status_{status_raw}", lang)
+        if translated and not translated.startswith("[?"):
+            status_label = translated
     except Exception:
-        status_label = test.get('status', 'unknown')
+        pass
 
-    # is_private может отсутствовать в старой БД
-    is_private = False
+    is_private = bool(test_dict.get('is_private') or 0)
+    title = test_dict.get('title') or '—'
+
+    # Безопасный escape
     try:
-        is_private = bool(test['is_private']) if 'is_private' in test.keys() else False
+        title_safe = utils.escape_html(title)
     except Exception:
-        is_private = False
+        title_safe = str(title).replace("<", "&lt;").replace(">", "&gt;")
 
-    text = (f"<b>{utils.escape_html(test['title'] or '—')}</b>\n\n"
-            f"ID: {test['id']}\n"
-            f"Тип: {test.get('test_type') or '—'}\n"
-            f"Язык: {test.get('language') or '—'}\n"
-            f"Статус: {status_label}\n"
-            f"Вопросов: {qcount}\n"
-            f"Платный: {'да' if test.get('is_paid') else 'нет'}\n"
-            f"Приватный: {'🔐 ДА' if is_private else 'нет'}")
+    text = (
+        f"<b>{title_safe}</b>\n\n"
+        f"ID: {tid}\n"
+        f"Тип: {test_dict.get('test_type') or '—'}\n"
+        f"Язык: {test_dict.get('language') or '—'}\n"
+        f"Статус: {status_label}\n"
+        f"Вопросов: {qcount}\n"
+        f"Платный: {'да' if test_dict.get('is_paid') else 'нет'}\n"
+        f"Приватный: {'🔐 ДА' if is_private else 'нет'}"
+    )
+
+    # Клавиатура — тоже crash-proof
+    kb = None
     try:
         kb = admin_test_actions_kb(tid, lang, is_private=is_private)
     except Exception as e:
         log.warning("admin_test_actions_kb error: %s", e)
-        kb = None
+        try:
+            kb = admin_test_actions_kb(tid, lang)
+        except Exception:
+            pass
+
+    # Отправляем (всё в try)
+    sent = False
     try:
         await call.message.edit_text(text, reply_markup=kb, parse_mode="HTML")
-    except Exception:
+        sent = True
+    except Exception as e1:
+        log.info("admtest edit failed: %s", e1)
         try:
             await call.message.answer(text, reply_markup=kb, parse_mode="HTML")
-        except Exception as e:
-            log.warning("admtest send error: %s", e)
-    await call.answer()
+            sent = True
+        except Exception as e2:
+            log.warning("admtest answer failed: %s", e2)
+            try:
+                # Последняя попытка — без HTML
+                await call.message.answer(
+                    f"Тест #{tid}: {title}\nСтатус: {status_label}\nВопросов: {qcount}",
+                    reply_markup=kb)
+                sent = True
+            except Exception as e3:
+                log.error("admtest TOTAL FAIL: %s", e3)
+
+    try:
+        await call.answer()
+    except Exception:
+        pass
 
 
 @router.callback_query(F.data.startswith("admpriv:"), IsAdmin())
@@ -1370,18 +1320,104 @@ async def cb_stats(call: CallbackQuery, user: dict):
 
 @router.callback_query(F.data == "adm:export", IsAdmin())
 async def cb_export(call: CallbackQuery, user: dict):
-    """Меню экспорта."""
+    """Меню экспорта + удаления результатов."""
     lang = user.get('language') or 'ru'
     from aiogram.utils.keyboard import InlineKeyboardBuilder
     kb = InlineKeyboardBuilder()
     kb.button(text="👥 Список пользователей", callback_data="adm:export:users")
     kb.button(text="📊 Результаты тестов", callback_data="adm:export:results")
+    kb.button(text="🔐 Результаты приватных тестов", callback_data="adm:export:privresults")
+    kb.button(text="🗑 Удалить ВСЕ результаты", callback_data="adm:delresults:all")
+    kb.button(text="🗑 Удалить результаты приватных", callback_data="adm:delresults:private")
     kb.button(text="↩️ Назад", callback_data="adm:menu")
     kb.adjust(1)
     await call.message.answer(
-        "📤 <b>Экспорт данных</b>\n\nВыберите тип:",
+        "📤 <b>Экспорт и управление результатами</b>",
         reply_markup=kb.as_markup(), parse_mode="HTML")
     await call.answer()
+
+
+@router.callback_query(F.data == "adm:export:privresults", IsAdmin())
+async def cb_export_private_results(call: CallbackQuery, user: dict):
+    """Экспорт только результатов приватных тестов."""
+    import csv, io
+    rows = db.fetchall("""
+        SELECT ts.*, t.title AS test_title, u.username, u.first_name
+        FROM test_statistics ts
+        JOIN tests t ON t.id = ts.test_id
+        LEFT JOIN users u ON u.tg_id = ts.tg_id
+        WHERE t.is_private=1
+        ORDER BY ts.finished_at DESC LIMIT 5000""")
+    if not rows:
+        await call.answer("Нет результатов по приватным тестам.", show_alert=True)
+        return
+    buf = io.StringIO()
+    w = csv.writer(buf)
+    w.writerow(['test_id', 'test_title', 'tg_id', 'username', 'first_name',
+                 'score', 'correct', 'wrong', 'total_questions',
+                 'time_seconds', 'finished_at'])
+    for r in rows:
+        w.writerow([r.get('test_id'), r.get('test_title'),
+                     r.get('tg_id'), r.get('username') or '',
+                     r.get('first_name') or '',
+                     r.get('score'), r.get('correct'), r.get('wrong'),
+                     r.get('total_questions'), r.get('total_time_seconds'),
+                     r.get('finished_at')])
+    from aiogram.types import BufferedInputFile
+    file = BufferedInputFile(buf.getvalue().encode('utf-8'),
+                               filename="private_results.csv")
+    await call.message.answer_document(file,
+                                          caption=f"🔐 Результаты приватных тестов: {len(rows)} строк")
+    await call.answer()
+
+
+@router.callback_query(F.data.startswith("adm:delresults:"), IsAdmin())
+async def cb_del_results_confirm(call: CallbackQuery, user: dict):
+    """Подтверждение удаления результатов."""
+    scope = call.data.split(":")[2]  # all или private
+    from aiogram.utils.keyboard import InlineKeyboardBuilder
+    kb = InlineKeyboardBuilder()
+    kb.button(text="✅ Да, удалить", callback_data=f"adm:delresults:confirm:{scope}")
+    kb.button(text="❌ Отмена", callback_data="adm:export")
+    kb.adjust(1)
+    label = "ВСЕ результаты" if scope == "all" else "результаты приватных тестов"
+    await call.message.answer(
+        f"⚠️ Вы точно хотите удалить <b>{label}</b>?\n\n"
+        f"Это действие <b>необратимо</b>!",
+        reply_markup=kb.as_markup(), parse_mode="HTML")
+    await call.answer()
+
+
+@router.callback_query(F.data.startswith("adm:delresults:confirm:"), IsAdmin())
+async def cb_del_results_apply(call: CallbackQuery, user: dict):
+    """Выполняем удаление."""
+    scope = call.data.split(":")[3]
+    if scope == "private":
+        # Удаляем только статистику и попытки по приватным тестам
+        deleted_stat = db.execute("""
+            DELETE FROM test_statistics
+            WHERE test_id IN (SELECT id FROM tests WHERE is_private=1)
+        """).rowcount
+        deleted_att = db.execute("""
+            DELETE FROM test_attempts
+            WHERE test_id IN (SELECT id FROM tests WHERE is_private=1)
+        """).rowcount
+        await call.message.answer(
+            f"✅ <b>Результаты приватных тестов удалены</b>\n\n"
+            f"📊 Статистики: {deleted_stat}\n"
+            f"📝 Попыток: {deleted_att}",
+            parse_mode="HTML")
+    else:
+        deleted_stat = db.execute("DELETE FROM test_statistics").rowcount
+        deleted_att = db.execute("DELETE FROM test_attempts").rowcount
+        deleted_ans = db.execute("DELETE FROM attempt_answers").rowcount
+        await call.message.answer(
+            f"✅ <b>Все результаты удалены</b>\n\n"
+            f"📊 Статистики: {deleted_stat}\n"
+            f"📝 Попыток: {deleted_att}\n"
+            f"💬 Ответов: {deleted_ans}",
+            parse_mode="HTML")
+    await call.answer("✅")
 
 
 @router.callback_query(F.data == "adm:export:users", IsAdmin())
