@@ -84,7 +84,43 @@ async def s_language(call: CallbackQuery, state: FSMContext, user: dict):
     lang = user.get('language') or 'ru'
     tl = call.data.split(":")[1]
     await state.update_data(language=tl)
-    # Кнопки времени
+    # Выбор раздела
+    cats = db.fetchall("SELECT * FROM test_categories ORDER BY sort_order, id")
+    await state.set_state(TestCreateStates.category_select)
+    kb = InlineKeyboardBuilder()
+    if cats:
+        for c in cats[:20]:
+            emoji = c.get('emoji') or '📚'
+            kb.button(text=f"{emoji} {c['name']}", callback_data=f"newcat:{c['id']}")
+    kb.button(text="📭 Без раздела", callback_data="newcat:none")
+    kb.button(text=t("btn_cancel", lang), callback_data="cancel")
+    kb.adjust(1)
+    if not cats:
+        await call.message.answer(
+            "📂 <b>Выбор раздела</b>\n\n"
+            "У вас пока нет ни одного раздела. Тест будет без раздела.\n\n"
+            "<i>Чтобы добавить разделы — отмените создание теста и перейдите "
+            "в /admin → 📂 Разделы.</i>",
+            reply_markup=kb.as_markup(), parse_mode="HTML")
+    else:
+        await call.message.answer(
+            "📂 <b>Выберите раздел для теста:</b>",
+            reply_markup=kb.as_markup(), parse_mode="HTML")
+    await call.answer()
+
+
+@router.callback_query(TestCreateStates.category_select, F.data.startswith("newcat:"), IsAdmin())
+async def s_category_choice(call: CallbackQuery, state: FSMContext, user: dict):
+    lang = user.get('language') or 'ru'
+    arg = call.data.split(":")[1]
+    if arg == "none":
+        await state.update_data(category_id=None)
+    else:
+        try:
+            await state.update_data(category_id=int(arg))
+        except ValueError:
+            pass
+    # Дальше — время
     await state.set_state(TestCreateStates.time_per_question)
     kb = InlineKeyboardBuilder()
     kb.button(text="⏱ 30 сек", callback_data="newtime:30")
@@ -180,14 +216,15 @@ async def _finish_create_test(bot: Bot, chat_id: int, state: FSMContext, user: d
     data.setdefault('price', 0)
     db.execute(
         """INSERT INTO tests
-           (title, description, subject, grade, category, language, test_type,
+           (title, description, subject, grade, category, category_id, language, test_type,
             time_per_question, attempts_limit, first_attempt_only, is_paid, price,
             shuffle_questions, shuffle_options, show_correct, show_explanation,
             required_channel, allow_duel, status, created_by, created_at)
-           VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,1,'active',?,?)""",
+           VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,1,'active',?,?)""",
         (
          data['title'], data['description'], data['subject'], data['grade'],
-         data['category'], data['language'], data['test_type'],
+         data['category'], data.get('category_id'),
+         data['language'], data['test_type'],
          data['time_per_question'], data['attempts_limit'],
          1 if data['first_attempt_only'] else 0,
          1 if data['is_paid'] else 0, data['price'],
