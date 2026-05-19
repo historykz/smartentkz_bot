@@ -52,12 +52,66 @@ async def cb_tests_menu(call: CallbackQuery, user: dict):
     lang = _resolve_lang(user)
     tests = _list_active_tests(lang)
     text = t("tests_catalog", lang)
-    if not tests:
+
+    # Проверяем приватные тесты этого юзера
+    from handlers import private_access as _pa
+    private_tests = _pa.list_user_private_tests(call.from_user.id)
+
+    if not tests and not private_tests:
         text += "\n\n" + t("no_tests", lang)
+
+    # Если есть приватные — добавляем раздел сверху
+    if private_tests:
+        text += f"\n\n🔐 <b>Доступно закрытых тестов: {len(private_tests)}</b>"
+
+    kb = tests_list_kb(tests, lang, page=0)
+    # Дополняем клавиатуру кнопкой «Мои закрытые тесты»
+    if private_tests:
+        from aiogram.types import InlineKeyboardButton
+        new_rows = list(kb.inline_keyboard) if kb else []
+        new_rows.insert(0, [InlineKeyboardButton(
+            text=f"🔐 Мои закрытые тесты ({len(private_tests)})",
+            callback_data="m:private_tests")])
+        from aiogram.types import InlineKeyboardMarkup
+        kb = InlineKeyboardMarkup(inline_keyboard=new_rows)
+
     try:
-        await call.message.edit_text(text, reply_markup=tests_list_kb(tests, lang, page=0))
+        await call.message.edit_text(text, reply_markup=kb, parse_mode="HTML")
     except Exception:
-        await call.message.answer(text, reply_markup=tests_list_kb(tests, lang, page=0))
+        await call.message.answer(text, reply_markup=kb, parse_mode="HTML")
+    await call.answer()
+
+
+@router.callback_query(F.data == "m:private_tests")
+async def cb_private_tests_list(call: CallbackQuery, user: dict):
+    """Каталог приватных тестов конкретного юзера."""
+    from handlers import private_access as _pa
+    lang = _resolve_lang(user)
+    private_tests = _pa.list_user_private_tests(call.from_user.id)
+
+    if not private_tests:
+        text = "🔐 <b>Закрытые тесты</b>\n\n<i>У вас нет доступа к закрытым тестам.</i>"
+        from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
+        kb = InlineKeyboardMarkup(inline_keyboard=[[
+            InlineKeyboardButton(text="↩️ Назад", callback_data="m:tests")
+        ]])
+    else:
+        text = (f"🔐 <b>Ваши закрытые тесты</b>\n\n"
+                f"Доступно: <b>{len(private_tests)}</b>\n"
+                f"Выберите тест для прохождения:")
+        from aiogram.utils.keyboard import InlineKeyboardBuilder
+        kb_builder = InlineKeyboardBuilder()
+        for tst in private_tests[:30]:
+            title = (tst.get('title') or '—')[:50]
+            kb_builder.button(text=f"🔐 {title}", callback_data=f"opentest:{tst['id']}")
+        kb_builder.button(text="↩️ Назад", callback_data="m:tests")
+        kb_builder.adjust(1)
+        kb = kb_builder.as_markup()
+
+    try:
+        await call.message.edit_text(text, reply_markup=kb, parse_mode="HTML")
+    except Exception:
+        await call.message.answer(text, reply_markup=kb, parse_mode="HTML")
     await call.answer()
 
 
@@ -197,6 +251,15 @@ async def cb_run_test(call: CallbackQuery, state: FSMContext, user: dict):
     if call.message.chat.type != "private":
         await call.answer(t("personal_chat_only", lang), show_alert=True)
         return
+
+    # Приватный тест — проверка доступа
+    if test.get('is_private'):
+        from handlers import private_access as _pa
+        if not _pa.user_has_private_access(test['id'], call.from_user.id):
+            await call.answer(
+                "❌ У вас нет доступа к этому тесту, или срок доступа истёк.",
+                show_alert=True)
+            return
 
     # Проверка доступа
     if test['is_paid'] and not utils.has_paid_access(user['id'], test_id=test['id']):
