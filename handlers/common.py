@@ -119,6 +119,13 @@ async def cmd_start(message: Message, state: FSMContext, user: dict):
         await message.answer(t("choose_language", lang), reply_markup=language_kb())
         await state.set_state(CommonStates.choosing_language)
         return
+
+    # Проверяем — прошёл ли юзер онбординг (для новых юзеров)
+    from handlers import onboarding as _onb
+    if not _onb.is_onboarded(message.from_user.id):
+        await _onb.start_onboarding(message, user)
+        return
+
     await message.answer(
         t("main_menu", lang),
         reply_markup=main_menu_kb(lang, utils.is_admin(message.from_user.id)),
@@ -225,6 +232,14 @@ async def cb_set_language(call: CallbackQuery, state: FSMContext, user: dict):
             await state.set_state(None)
             return
 
+    # Проверяем — прошёл ли юзер онбординг
+    from handlers import onboarding as _onb
+    if not _onb.is_onboarded(call.from_user.id):
+        # Запускаем онбординг вместо главного меню
+        await _onb.start_onboarding(call.message, user)
+        await state.set_state(None)
+        return
+
     await call.message.answer(
         t("main_menu", lang),
         reply_markup=main_menu_kb(lang, utils.is_admin(call.from_user.id)),
@@ -292,13 +307,10 @@ async def cmd_help(message: Message, user: dict):
 
 @router.callback_query(F.data == "m:help")
 async def cb_help(call: CallbackQuery, user: dict):
-    lang = _resolve_lang(user)
-    try:
-        await call.message.edit_text(t("help_text", lang),
-                                     reply_markup=main_menu_kb(lang, utils.is_admin(call.from_user.id)))
-    except Exception:
-        await call.message.answer(t("help_text", lang))
-    await call.answer()
+    """Помощь = повторно показать онбординг."""
+    from handlers import onboarding as _onb
+    # Сбрасываем флаг, чтобы можно было снова пройти онбординг
+    await _onb.show_screen(call, user, 1)
 
 
 @router.callback_query(F.data == "m:support")
