@@ -17,6 +17,7 @@ class TestCreateStates(StatesGroup):
     subject = State()
     grade = State()
     category = State()
+    category_select = State()
     language = State()
     test_type = State()
     time_per_question = State()
