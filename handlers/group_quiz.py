@@ -34,10 +34,10 @@ async def on_my_chat_member(event: ChatMemberUpdated, bot: Bot):
     if chat.type not in ("group", "supergroup"):
         return
     new_status = event.new_chat_member.status
+    old_status = event.old_chat_member.status if event.old_chat_member else None
     actor_id = event.from_user.id if event.from_user else None
 
     if new_status in ("kicked", "left"):
-        # Бот ушёл — пометим, но не удаляем (история)
         db.execute("DELETE FROM known_groups WHERE chat_id=?", (chat.id,))
         log.info("Бот удалён из группы %s (%s)", chat.id, chat.title)
         return
@@ -56,6 +56,31 @@ async def on_my_chat_member(event: ChatMemberUpdated, bot: Bot):
                VALUES (?,?,?,?,?)""",
             (chat.id, chat.title or "", chat.type, actor_id, 1 if is_admin else 0))
     log.info("Группа известна: %s (%s), бот-админ: %s", chat.id, chat.title, is_admin)
+
+    # Бот только что добавлен в группу. Если добавил админ бота — пишем
+    # приветственное сообщение со ссылкой на /launch_X для последних тестов
+    just_added = old_status in (None, "left", "kicked") and new_status in ("member", "administrator")
+    if just_added and actor_id and utils.is_admin(actor_id):
+        try:
+            recent = db.fetchall(
+                "SELECT id, title FROM tests WHERE status='active' ORDER BY id DESC LIMIT 5")
+            lines = [
+                "👋 <b>Бот добавлен в группу!</b>\n",
+                "Чтобы запустить тест в этой группе, отправьте команду:",
+                "<code>/launch_&lt;test_id&gt;</code>\n",
+            ]
+            if recent:
+                lines.append("Недавние тесты:")
+                for r in recent:
+                    title = (r['title'] or '—')[:50]
+                    lines.append(f"• <code>/launch_{r['id']}</code> — {utils.escape_html(title)}")
+            if not is_admin:
+                lines.append(
+                    "\n⚠️ Для корректной работы Quiz Poll сделайте бота "
+                    "<b>администратором</b> в этой группе.")
+            await bot.send_message(chat.id, "\n".join(lines), parse_mode="HTML")
+        except Exception as e:
+            log.warning("Не удалось отправить приветствие в %s: %s", chat.id, e)
 
 
 @router.message(F.chat.type.in_({"group", "supergroup"}))
@@ -94,71 +119,147 @@ async def cmd_stop_group(message: Message, bot: Bot):
 
 # ============ Запуск теста в группу ============
 
-@router.callback_query(F.data.startswith("gqlaunch:"))
-async def cb_gq_launch(call: CallbackQuery):
+@router.callback_query(F.data.startswith("groupsend:"))
+async def cb_group_send(call: CallbackQuery):
     """
-    Запуск группового теста из inline-карточки.
-    Сработает только если callback нажал тот же админ, кто её отправил.
+    Админ нажал «Отправить в группу» в личке.
+    Показываем инструкцию + кнопку «Добавить бота в группу».
     """
+    log.info("cb_group_send triggered: callback_data=%s from user=%s",
+             call.data, call.from_user.id if call.from_user else None)
     try:
-        parts = call.data.split(":")
-        test_id = int(parts[1])
-        intended_admin_id = int(parts[2])
-    except (ValueError, IndexError):
-        await call.answer()
+        test_id = int(call.data.split(":")[1])
+    except (ValueError, IndexError) as e:
+        log.warning("groupsend parse error: %s", e)
+        await call.answer("Ошибка callback.", show_alert=True)
         return
 
-    # Только админ бота
     if not utils.is_admin(call.from_user.id):
-        await call.answer(
-            "⛔ Только администратор бота может запустить тест.",
-            show_alert=True)
+        await call.answer("⛔ Только администратор бота может отправлять тесты в группы.",
+                          show_alert=True)
         return
 
-    # Проверка: тот ли админ, кто отправлял карточку
-    if call.from_user.id != intended_admin_id:
-        await call.answer(
-            "⛔ Эту карточку отправил другой администратор. Отправьте свою.",
-            show_alert=True)
+    try:
+        test = test_runner.get_test(test_id)
+    except Exception as e:
+        log.exception("groupsend get_test error: %s", e)
+        await call.answer(f"Ошибка БД: {e}", show_alert=True)
         return
 
-    chat = call.message.chat if call.message else None
-    if not chat or chat.type not in ("group", "supergroup"):
-        await call.answer(
-            "⚠️ Эту кнопку нужно нажимать в группе, а не в личке.",
-            show_alert=True)
-        return
-
-    test = test_runner.get_test(test_id)
     if not test:
         await call.answer("Тест не найден.", show_alert=True)
         return
 
-    # Записываем группу в known_groups для будущей статистики
+    try:
+        bot_user = await call.bot.me()
+        bot_username = bot_user.username
+    except Exception as e:
+        log.exception("groupsend get_me error: %s", e)
+        await call.answer(f"Ошибка: {e}", show_alert=True)
+        return
+
+    title = utils.escape_html(test.get('title') or '—')
+    text = (
+        f"📤 <b>Запуск теста «{title}» в группе</b>\n\n"
+        f"<b>Способ 1 — добавить бота:</b>\n"
+        f"Нажмите кнопку ниже → выберите группу → бот добавится и сразу запустит тест.\n\n"
+        f"<b>Способ 2 — бот уже в группе:</b>\n"
+        f"Зайдите в группу и отправьте там команду:\n"
+        f"<code>/launch_{test_id}</code>\n\n"
+        f"⚠️ Запустить тест может только администратор бота. "
+        f"Бот должен быть в группе администратором, иначе Quiz Poll "
+        f"не сможет отслеживать ответы участников."
+    )
+
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(
+            text="➕ Добавить бота в группу",
+            url=f"https://t.me/{bot_username}?startgroup=launch_{test_id}",
+        )],
+        [InlineKeyboardButton(
+            text="↩️ Назад к тесту",
+            callback_data=f"opentest:{test_id}",
+        )],
+    ])
+
+    try:
+        await call.message.answer(text, reply_markup=kb,
+                                    parse_mode="HTML", disable_web_page_preview=True)
+    except Exception as e:
+        log.exception("groupsend answer error: %s", e)
+        await call.answer(f"Ошибка отправки: {e}", show_alert=True)
+        return
+
+    await call.answer()
+
+
+@router.message(F.text.regexp(r"^/launch_(\d+)(@\w+)?$").as_("m"),
+                 F.chat.type.in_({"group", "supergroup"}))
+async def cmd_launch_test(message: Message, m):
+    """
+    /launch_<test_id> в группе — запуск теста.
+    Только админ бота.
+    """
+    if not utils.is_admin(message.from_user.id):
+        try:
+            warn = await message.reply(
+                "⛔ Запустить тест может только администратор бота.")
+            # Удалим и команду и предупреждение через 5 сек, чтобы не засорять чат
+            import asyncio
+            async def _cleanup():
+                await asyncio.sleep(5)
+                try:
+                    await message.delete()
+                except Exception:
+                    pass
+                try:
+                    await warn.delete()
+                except Exception:
+                    pass
+            asyncio.create_task(_cleanup())
+        except Exception:
+            pass
+        return
+
+    try:
+        test_id = int(m.group(1))
+    except (ValueError, AttributeError):
+        return
+
+    test = test_runner.get_test(test_id)
+    if not test:
+        await message.reply("❌ Тест не найден.")
+        return
+
+    # Записываем группу
     db.execute(
         """INSERT OR IGNORE INTO known_groups (chat_id, title, type, added_by, seen_at)
            VALUES (?,?,?,?, CURRENT_TIMESTAMP)""",
-        (chat.id, chat.title or "", chat.type, call.from_user.id))
+        (message.chat.id, message.chat.title or "",
+         message.chat.type, message.from_user.id))
 
     ok, key, gq_id = await group_quiz_service.start_lobby(
-        call.bot, dict(test), chat.id, call.from_user.id, language='ru')
+        message.bot, dict(test), message.chat.id, message.from_user.id)
 
     if not ok:
         if key == "already_running":
-            await call.answer(
-                "⚠️ В этой группе уже идёт тест. Сначала /stop.",
-                show_alert=True)
+            try:
+                await message.reply(
+                    "⚠️ В этой группе уже идёт тест. Сначала /stop.")
+            except Exception:
+                pass
         else:
-            await call.answer(f"❌ Не удалось: {key}", show_alert=True)
+            try:
+                await message.reply(f"❌ Не удалось запустить: {key}")
+            except Exception:
+                pass
         return
 
-    # Удаляем inline-карточку (она больше не нужна — лобби-карточка уже отправлена)
+    # Удаляем команду /launch_X — она больше не нужна
     try:
-        await call.message.delete()
+        await message.delete()
     except Exception:
         pass
-
-    await call.answer("✅ Тест запущен!")
 
 
 # ============ Игрок присоединяется ============
