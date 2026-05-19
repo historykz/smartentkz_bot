@@ -317,24 +317,7 @@ def init_db() -> None:
         );
         """)
 
-        # --- GROUP QUIZZES ---
-        cur.execute("""
-        CREATE TABLE IF NOT EXISTS group_quizzes (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            chat_id INTEGER NOT NULL,
-            test_id INTEGER NOT NULL,
-            started_by_user_id INTEGER NOT NULL,
-            status TEXT DEFAULT 'collecting',  -- collecting, running, paused, finished
-            current_question_index INTEGER DEFAULT 0,
-            question_order TEXT DEFAULT '',
-            missed_questions_counter INTEGER DEFAULT 0,
-            announce_message_id INTEGER,
-            language TEXT DEFAULT 'ru',
-            finished_at TEXT,
-            created_at TEXT DEFAULT CURRENT_TIMESTAMP
-        );
-        """)
-        cur.execute("CREATE INDEX IF NOT EXISTS idx_groupq_chat ON group_quizzes(chat_id);")
+        # --- (group_quizzes определена ниже в актуальной версии) ---
 
         cur.execute("""
         CREATE TABLE IF NOT EXISTS group_quiz_participants (
@@ -582,6 +565,76 @@ def init_db() -> None:
         """)
         cur.execute("CREATE INDEX IF NOT EXISTS idx_gq_chat ON group_quizzes(chat_id);")
         cur.execute("CREATE INDEX IF NOT EXISTS idx_gq_status ON group_quizzes(status);")
+
+        # === МИГРАЦИИ для старых БД (раньше была другая схема group_quizzes) ===
+        for alter in [
+            "ALTER TABLE group_quizzes ADD COLUMN started_by INTEGER",
+            "ALTER TABLE group_quizzes ADD COLUMN lobby_message_id INTEGER",
+            "ALTER TABLE group_quizzes ADD COLUMN current_poll_id TEXT",
+            "ALTER TABLE group_quizzes ADD COLUMN current_poll_message_id INTEGER",
+            "ALTER TABLE group_quizzes ADD COLUMN current_poll_correct_index INTEGER",
+            "ALTER TABLE group_quizzes ADD COLUMN current_poll_options TEXT",
+            "ALTER TABLE group_quizzes ADD COLUMN current_question_started_at TEXT",
+            "ALTER TABLE group_quizzes ADD COLUMN started_at TEXT",
+        ]:
+            try:
+                cur.execute(alter)
+            except Exception:
+                pass
+
+        # Если БД старая — там было started_by_user_id; копируем в started_by
+        try:
+            cur.execute(
+                "UPDATE group_quizzes SET started_by = started_by_user_id "
+                "WHERE started_by IS NULL AND started_by_user_id IS NOT NULL")
+        except Exception:
+            pass
+
+        # Проверяем есть ли старое поле started_by_user_id с NOT NULL — пересоздаём таблицу
+        try:
+            cols = cur.execute("PRAGMA table_info(group_quizzes)").fetchall()
+            col_names = [c[1] for c in cols]
+            has_legacy = 'started_by_user_id' in col_names
+            if has_legacy:
+                logger.info("Обнаружена старая схема group_quizzes, пересоздаём таблицу...")
+                # Сохраняем данные
+                cur.execute("ALTER TABLE group_quizzes RENAME TO group_quizzes_old")
+                # Создаём новую таблицу с правильной схемой
+                cur.execute("""
+                    CREATE TABLE group_quizzes (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        chat_id INTEGER NOT NULL,
+                        test_id INTEGER NOT NULL,
+                        started_by INTEGER NOT NULL,
+                        status TEXT DEFAULT 'lobby',
+                        lobby_message_id INTEGER,
+                        current_question_index INTEGER DEFAULT 0,
+                        current_poll_id TEXT,
+                        current_poll_message_id INTEGER,
+                        current_poll_correct_index INTEGER,
+                        current_poll_options TEXT,
+                        current_question_started_at TEXT,
+                        language TEXT DEFAULT 'ru',
+                        created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+                        started_at TEXT,
+                        finished_at TEXT
+                    )""")
+                # Переносим данные
+                cur.execute("""
+                    INSERT INTO group_quizzes
+                        (id, chat_id, test_id, started_by, status,
+                         current_question_index, language, finished_at, created_at)
+                    SELECT id, chat_id, test_id,
+                           COALESCE(started_by, started_by_user_id) AS started_by,
+                           status, current_question_index, language, finished_at, created_at
+                    FROM group_quizzes_old
+                """)
+                cur.execute("DROP TABLE group_quizzes_old")
+                cur.execute("CREATE INDEX IF NOT EXISTS idx_gq_chat ON group_quizzes(chat_id);")
+                cur.execute("CREATE INDEX IF NOT EXISTS idx_gq_status ON group_quizzes(status);")
+                logger.info("group_quizzes успешно пересоздана с актуальной схемой")
+        except Exception as e:
+            logger.warning("Миграция group_quizzes провалилась: %s", e)
 
         # --- УЧАСТНИКИ ГРУППОВОГО ТЕСТА ---
         cur.execute("""
