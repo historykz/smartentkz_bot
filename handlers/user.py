@@ -49,36 +49,95 @@ def _list_active_tests(language: str, ttype_filter: str = None) -> list[dict]:
 
 @router.callback_query(F.data == "m:tests")
 async def cb_tests_menu(call: CallbackQuery, user: dict):
+    """Главный экран каталога — показывает разделы."""
     lang = _resolve_lang(user)
-    tests = _list_active_tests(lang)
-    text = t("tests_catalog", lang)
+    from handlers import categories, private_access as _pa
 
-    # Проверяем приватные тесты этого юзера
-    from handlers import private_access as _pa
+    cats = categories.get_categories()
     private_tests = _pa.list_user_private_tests(call.from_user.id)
+    tests_no_cat = categories.get_tests_without_category(lang)
 
-    if not tests and not private_tests:
-        text += "\n\n" + t("no_tests", lang)
+    text = "📚 <b>Каталог тестов</b>\n\n"
+    if cats:
+        text += "Выберите раздел:\n"
+    elif tests_no_cat or private_tests:
+        text += "<i>Разделов пока нет — все доступные тесты ниже.</i>\n"
+    else:
+        text += "<i>Пока нет ни одного теста.</i>"
 
-    # Если есть приватные — добавляем раздел сверху
+    kb = InlineKeyboardBuilder()
+
+    # Раздел приватных тестов — если есть
     if private_tests:
-        text += f"\n\n🔐 <b>Доступно закрытых тестов: {len(private_tests)}</b>"
+        kb.button(text=f"🔐 Мои закрытые тесты ({len(private_tests)})",
+                  callback_data="m:private_tests")
 
-    kb = tests_list_kb(tests, lang, page=0)
-    # Дополняем клавиатуру кнопкой «Мои закрытые тесты»
-    if private_tests:
-        from aiogram.types import InlineKeyboardButton
-        new_rows = list(kb.inline_keyboard) if kb else []
-        new_rows.insert(0, [InlineKeyboardButton(
-            text=f"🔐 Мои закрытые тесты ({len(private_tests)})",
-            callback_data="m:private_tests")])
-        from aiogram.types import InlineKeyboardMarkup
-        kb = InlineKeyboardMarkup(inline_keyboard=new_rows)
+    # Категории
+    for c in cats:
+        cnt = db.fetchone(
+            """SELECT COUNT(*) AS c FROM tests
+               WHERE category_id=? AND status='active'
+                 AND COALESCE(is_private,0)=0 AND language=?""",
+            (c['id'], lang))['c']
+        if cnt > 0:
+            emoji = c.get('emoji') or '📚'
+            kb.button(text=f"{emoji} {c['name']} ({cnt})",
+                      callback_data=f"m:cat:{c['id']}")
+
+    # Тесты без раздела
+    if tests_no_cat:
+        kb.button(text=f"📭 Без раздела ({len(tests_no_cat)})",
+                  callback_data="m:cat:none")
+
+    kb.button(text="↩️ Назад в меню", callback_data="m:menu")
+    kb.adjust(1)
 
     try:
-        await call.message.edit_text(text, reply_markup=kb, parse_mode="HTML")
+        await call.message.edit_text(text, reply_markup=kb.as_markup(), parse_mode="HTML")
     except Exception:
-        await call.message.answer(text, reply_markup=kb, parse_mode="HTML")
+        await call.message.answer(text, reply_markup=kb.as_markup(), parse_mode="HTML")
+    await call.answer()
+
+
+@router.callback_query(F.data.startswith("m:cat:"))
+async def cb_tests_by_category(call: CallbackQuery, user: dict):
+    """Список тестов в выбранном разделе."""
+    lang = _resolve_lang(user)
+    from handlers import categories
+    arg = call.data.split(":")[2]
+    if arg == "none":
+        tests = categories.get_tests_without_category(lang)
+        title = "📭 Без раздела"
+    else:
+        try:
+            cat_id = int(arg)
+        except ValueError:
+            await call.answer()
+            return
+        cat = db.fetchone("SELECT * FROM test_categories WHERE id=?", (cat_id,))
+        if not cat:
+            await call.answer("Раздел не найден.", show_alert=True)
+            return
+        tests = categories.get_tests_in_category(cat_id, lang)
+        emoji = cat.get('emoji') or '📚'
+        title = f"{emoji} {cat['name']}"
+
+    text = f"<b>{utils.escape_html(title)}</b>\n\n"
+    if not tests:
+        text += "<i>В этом разделе пока нет тестов.</i>"
+
+    kb = InlineKeyboardBuilder()
+    for tst in tests[:30]:
+        t_title = (tst.get('title') or '—')[:50]
+        prefix = "💎 " if tst.get('is_paid') else ""
+        kb.button(text=f"{prefix}{t_title}", callback_data=f"opentest:{tst['id']}")
+    kb.button(text="↩️ К разделам", callback_data="m:tests")
+    kb.adjust(1)
+
+    try:
+        await call.message.edit_text(text, reply_markup=kb.as_markup(), parse_mode="HTML")
+    except Exception:
+        await call.message.answer(text, reply_markup=kb.as_markup(), parse_mode="HTML")
     await call.answer()
 
 
