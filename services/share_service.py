@@ -89,25 +89,26 @@ def build_test_card(test: dict, bot_username: str = None,
     text = "\n".join(lines)
 
     deep_link = build_test_deep_link(test_id, bu)
+    is_private_test = bool(test.get("is_private"))
+    is_paid_test = bool(test.get("is_paid"))
 
     rows = []
     if in_bot:
-        # В личке у юзера — callback (без deep-link через t.me)
         rows.append([InlineKeyboardButton(
             text="▶️ Пройти тест", callback_data=f"run:{test_id}")])
     else:
         rows.append([InlineKeyboardButton(
             text="▶️ Пройти тест", url=deep_link)])
 
-    rows.append([InlineKeyboardButton(
-        text="🔗 Поделиться",
-        switch_inline_query=f"test:{test_id}",
-    )])
+    # Кнопка «Поделиться» только для бесплатных и не-приватных тестов
+    if not is_private_test and not is_paid_test:
+        rows.append([InlineKeyboardButton(
+            text="🔗 Поделиться",
+            switch_inline_query=f"test:{test_id}",
+        )])
 
     # Админ-кнопки (только в личке)
     if in_bot and viewer_is_admin:
-        # "Отправить в группу" — открываем инструкцию (не inline, т.к.
-        # callback от inline-сообщения не даёт chat_id группы)
         rows.append([InlineKeyboardButton(
             text="📤 Отправить в группу",
             callback_data=f"groupsend:{test_id}",
