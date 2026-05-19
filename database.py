@@ -738,4 +738,10 @@ def init_db() -> None:
         except Exception:
             pass
 
+        # --- Флаг прохождения онбординга ---
+        try:
+            cur.execute("ALTER TABLE users ADD COLUMN onboarded_at TEXT")
+        except Exception:
+            pass
+
         logger.info("База данных инициализирована")
