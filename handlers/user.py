@@ -58,13 +58,28 @@ async def cb_tests_menu(call: CallbackQuery, user: dict):
     private_tests = _pa.list_user_private_tests(call.from_user.id)
     tests_no_cat = categories.get_tests_without_category(lang)
 
-    text = "📚 <b>Каталог тестов</b>\n\n"
-    if cats:
-        text += "Выберите раздел:\n"
-    elif tests_no_cat or private_tests:
-        text += "<i>Разделов пока нет — все доступные тесты ниже.</i>\n"
+    if lang == "kz":
+        title_main = "📚 <b>Тесттер каталогы</b>"
+        hint_choose = ("Қай пәннен жаттыққың келетінін таңда — ішінде нақты "
+                        "тесттер болады.\n\n"
+                        "📌 Бөлім жанындағы сан — онда қанша тест бар.")
+        hint_no_cats = "<i>Бөлімдер жоқ — қолжетімді тесттер төменде.</i>"
+        hint_empty = "<i>Әзірге бірде-бір тест жоқ. Кейінірек қайта кір.</i>"
     else:
-        text += "<i>Пока нет ни одного теста.</i>"
+        title_main = "📚 <b>Каталог тестов</b>"
+        hint_choose = ("Выбери предмет в котором хочешь потренироваться — "
+                        "внутри будут конкретные тесты.\n\n"
+                        "📌 Цифра рядом с разделом — сколько там тестов.")
+        hint_no_cats = "<i>Разделов пока нет — все доступные тесты ниже.</i>"
+        hint_empty = "<i>Пока нет ни одного теста. Загляни попозже.</i>"
+
+    text = title_main + "\n\n"
+    if cats:
+        text += hint_choose
+    elif tests_no_cat or private_tests:
+        text += hint_no_cats
+    else:
+        text += hint_empty
 
     kb = InlineKeyboardBuilder()
 
@@ -108,7 +123,7 @@ async def cb_tests_by_category(call: CallbackQuery, user: dict):
     arg = call.data.split(":")[2]
     if arg == "none":
         tests = categories.get_tests_without_category(lang)
-        title = "📭 Без раздела"
+        cat_title = "📭 Без раздела" if lang != "kz" else "📭 Бөлімсіз"
     else:
         try:
             cat_id = int(arg)
@@ -121,18 +136,35 @@ async def cb_tests_by_category(call: CallbackQuery, user: dict):
             return
         tests = categories.get_tests_in_category(cat_id, lang)
         emoji = cat.get('emoji') or '📚'
-        title = f"{emoji} {cat['name']}"
+        cat_title = f"{emoji} {cat['name']}"
 
-    text = f"<b>{utils.escape_html(title)}</b>\n\n"
-    if not tests:
-        text += "<i>В этом разделе пока нет тестов.</i>"
+    if lang == "kz":
+        hint = (f"Сен «{utils.escape_html(cat_title)}» бөлімін таңдадың 👍\n"
+                f"Төменде — тесттер тізімі. Сипаттамасы бар картаны "
+                f"көру үшін кез келгенін бас.\n\n"
+                f"📌 💎 белгісі бар тесттер — ақылы.")
+        empty_text = "<i>Бұл бөлімде әзірге тесттер жоқ.</i>"
+        back_btn = "↩️ Бөлімдерге"
+    else:
+        hint = (f"Ты выбрал «{utils.escape_html(cat_title)}» 👍\n"
+                f"Ниже — список тестов. Тапай любой, чтобы увидеть карточку "
+                f"с описанием.\n\n"
+                f"📌 Тесты со значком 💎 — платные.")
+        empty_text = "<i>В этом разделе пока нет тестов.</i>"
+        back_btn = "↩️ К разделам"
+
+    text = f"<b>{utils.escape_html(cat_title)}</b>\n\n"
+    if tests:
+        text += hint
+    else:
+        text += empty_text
 
     kb = InlineKeyboardBuilder()
     for tst in tests[:30]:
         t_title = (tst.get('title') or '—')[:50]
         prefix = "💎 " if tst.get('is_paid') else ""
         kb.button(text=f"{prefix}{t_title}", callback_data=f"opentest:{tst['id']}")
-    kb.button(text="↩️ К разделам", callback_data="m:tests")
+    kb.button(text=back_btn, callback_data="m:tests")
     kb.adjust(1)
 
     try:
