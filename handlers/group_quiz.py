@@ -105,7 +105,37 @@ async def on_group_message(message: Message):
 
 @router.message(Command("stop"), F.chat.type.in_({"group", "supergroup"}))
 async def cmd_stop_group(message: Message, bot: Bot):
-    ok, key = await group_quiz_service.stop_quiz(bot, message.chat.id, message.from_user.id)
+    # Если сообщение от имени канала/чата — берём ID отправителя-юзера если есть
+    # иначе разрешаем (это от имени самой группы)
+    requester_tg_id = message.from_user.id if message.from_user else None
+    if requester_tg_id is None and message.sender_chat:
+        # Сообщение от имени чата — считаем что отправил админ группы
+        requester_tg_id = 0  # placeholder, ниже разрешим если sender_chat == текущий чат
+        if message.sender_chat.id == message.chat.id:
+            # От имени той же группы → разрешаем сразу
+            ok, key = await group_quiz_service.stop_quiz(
+                bot, message.chat.id, requester_tg_id=0)
+            # force-stop: убираем проверку
+            if not ok and key == "no_rights":
+                # Принудительный стоп для anonymous group admin
+                gq = __import__('database').fetchone(
+                    "SELECT id FROM group_quizzes WHERE chat_id=? AND status IN ('lobby','running')",
+                    (message.chat.id,))
+                if gq:
+                    await group_quiz_service._cancel_quiz_timers(gq['id'])
+                    __import__('database').execute(
+                        "UPDATE group_quizzes SET status='cancelled', finished_at=CURRENT_TIMESTAMP WHERE id=?",
+                        (gq['id'],))
+                    try:
+                        await message.reply("🛑 Тест остановлен.")
+                    except Exception:
+                        pass
+            return
+
+    if requester_tg_id is None:
+        return
+
+    ok, key = await group_quiz_service.stop_quiz(bot, message.chat.id, requester_tg_id)
     if not ok:
         if key == "no_active":
             return  # молча игнорим — нет активного теста
@@ -198,13 +228,25 @@ async def cb_group_send(call: CallbackQuery):
 async def cmd_launch_test(message: Message, m):
     """
     /launch_<test_id> в группе — запуск теста.
-    Только админ бота.
+    Может быть отправлено:
+      • Лично админом бота (message.from_user.id ∈ admins)
+      • От имени группы (anonymous admin) — разрешаем
+      • Из связанного канала — разрешаем
     """
-    if not utils.is_admin(message.from_user.id):
+    # Определяем кто отправил
+    from_user_id = message.from_user.id if message.from_user else None
+    is_anonymous_admin = (message.sender_chat is not None
+                           and message.sender_chat.id == message.chat.id)
+    is_channel_repost = (message.sender_chat is not None
+                          and message.sender_chat.id != message.chat.id)
+    is_bot_admin = utils.is_admin(from_user_id) if from_user_id else False
+
+    allowed = is_bot_admin or is_anonymous_admin or is_channel_repost
+
+    if not allowed:
         try:
             warn = await message.reply(
                 "⛔ Запустить тест может только администратор бота.")
-            # Удалим и команду и предупреждение через 5 сек, чтобы не засорять чат
             import asyncio
             async def _cleanup():
                 await asyncio.sleep(5)
@@ -221,6 +263,9 @@ async def cmd_launch_test(message: Message, m):
             pass
         return
 
+    # ID для started_by — если есть юзер, берём его, иначе ID чата
+    starter_id = from_user_id if from_user_id else message.chat.id
+
     try:
         test_id = int(m.group(1))
     except (ValueError, AttributeError):
@@ -236,10 +281,10 @@ async def cmd_launch_test(message: Message, m):
         """INSERT OR IGNORE INTO known_groups (chat_id, title, type, added_by, seen_at)
            VALUES (?,?,?,?, CURRENT_TIMESTAMP)""",
         (message.chat.id, message.chat.title or "",
-         message.chat.type, message.from_user.id))
+         message.chat.type, starter_id))
 
     ok, key, gq_id = await group_quiz_service.start_lobby(
-        message.bot, dict(test), message.chat.id, message.from_user.id)
+        message.bot, dict(test), message.chat.id, starter_id)
 
     if not ok:
         if key == "already_running":
