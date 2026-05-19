@@ -412,7 +412,9 @@ async def cb_share_test(call: CallbackQuery, user: dict):
     if not test:
         await call.answer(t("test_not_found", lang), show_alert=True)
         return
-    text, kb = share_service.build_test_card(test)
+    is_admin = utils.is_admin(call.from_user.id)
+    text, kb = share_service.build_test_card(
+        dict(test), in_bot=True, viewer_is_admin=is_admin)
     try:
         await call.message.delete()
     except Exception:
