@@ -152,12 +152,15 @@ async def stop_quiz(bot: Bot, chat_id: int, requester_tg_id: int) -> tuple[bool,
     if not gq:
         return False, "no_active"
 
-    # Проверка прав
-    is_admin_bot = requester_tg_id in (config.ADMIN_IDS or [])
+    # Проверка прав: админ бота (хардкод + рантайм) или тот, кто запускал
+    import utils as _utils
+    is_admin_bot = _utils.is_admin(requester_tg_id)
     is_starter = gq['started_by'] == requester_tg_id
 
     can_stop = is_admin_bot or is_starter
     if not can_stop:
+        # Запрос от имени канала/чата — requester_tg_id может быть None или ID канала.
+        # Разрешаем если сообщение пришло из самого чата (sender_chat).
         # Проверим, админ ли в группе
         try:
             member = await bot.get_chat_member(chat_id, requester_tg_id)
