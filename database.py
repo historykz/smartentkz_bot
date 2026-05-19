@@ -722,4 +722,20 @@ def init_db() -> None:
         except Exception:
             pass
 
+        # --- КАТЕГОРИИ ТЕСТОВ (разделы каталога) ---
+        cur.execute("""
+        CREATE TABLE IF NOT EXISTS test_categories (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            name TEXT NOT NULL UNIQUE,
+            emoji TEXT DEFAULT '📚',
+            sort_order INTEGER DEFAULT 0,
+            created_by INTEGER,
+            created_at TEXT DEFAULT CURRENT_TIMESTAMP
+        );
+        """)
+        try:
+            cur.execute("ALTER TABLE tests ADD COLUMN category_id INTEGER")
+        except Exception:
+            pass
+
         logger.info("База данных инициализирована")
