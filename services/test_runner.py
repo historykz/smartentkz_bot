@@ -440,14 +440,26 @@ async def process_poll_answer(bot: Bot, poll_id: str, option_ids: list[int],
     attempt = get_attempt(info["attempt_id"])
     if not attempt or attempt["status"] != "in_progress":
         return
-    # Проверим, что пользователь — владелец попытки
     user_row = db.fetchone("SELECT id FROM users WHERE tg_id=?", (user_tg_id,))
     if not user_row or user_row["id"] != attempt["user_id"]:
         return
-    # Делегируем стандартному обработчику
     await process_answer(bot, info["attempt_id"], info["question_id"],
                           option_id, info["chat_id"])
-    # Чистим
+
+    # ── Защита приватных тестов: удаляем poll СРАЗУ после ответа ──
+    try:
+        test = db.fetchone(
+            "SELECT is_private FROM tests WHERE id=?", (attempt['test_id'],))
+        if test and test.get('is_private'):
+            chat_id = info["chat_id"]
+            msg_id = info["msg_id"]
+            try:
+                await bot.delete_message(chat_id, msg_id)
+            except Exception:
+                pass
+    except Exception:
+        pass
+
     _poll_map.pop(poll_id, None)
 
 
@@ -535,32 +547,40 @@ async def finalize_attempt(bot: Bot, attempt_id: int, chat_id: int,
         user_row = db.fetchone("SELECT tg_id, username, first_name, last_name FROM users WHERE id=?",
                                 (attempt['user_id'],))
         if user_row and (correct + wrong + skipped) > 0:
-            full_name = " ".join(filter(None, [user_row.get('first_name'), user_row.get('last_name')])) or "Игрок"
+            # КРИТИЧНО: sqlite3.Row не имеет .get() — конвертируем в dict
+            user_dict = dict(user_row)
+            attempt_dict = dict(attempt)
+            full_name = " ".join(filter(None, [
+                user_dict.get('first_name') or '',
+                user_dict.get('last_name') or ''
+            ])).strip() or "Игрок"
             # Длительность в секундах
             duration_sec = 0
-            if attempt.get('start_time'):
+            if attempt_dict.get('start_time'):
                 try:
                     from datetime import datetime as _dt
-                    st = _dt.fromisoformat(attempt['start_time'])
+                    st = _dt.fromisoformat(attempt_dict['start_time'])
                     duration_sec = int((_dt.utcnow() - st).total_seconds())
                 except Exception:
                     pass
             _gqs.save_private_attempt_to_statistics(
                 test_id=test['id'],
-                user_id=attempt['user_id'],
-                tg_id=user_row['tg_id'],
-                username=user_row.get('username') or "",
+                user_id=attempt_dict['user_id'],
+                tg_id=user_dict.get('tg_id'),
+                username=user_dict.get('username') or "",
                 full_name=full_name,
                 correct=correct,
                 wrong=wrong,
                 skipped=skipped,
                 total_questions=total,
                 total_time_seconds=duration_sec,
-                started_at=attempt.get('start_time') or now_iso(),
+                started_at=attempt_dict.get('start_time') or now_iso(),
                 finished_at=now_iso(),
             )
+            logger.info("Сохранено в test_statistics: test_id=%s user_id=%s score=%s",
+                         test['id'], attempt_dict['user_id'], correct)
     except Exception as e:
-        logger.warning("Не удалось сохранить в test_statistics: %s", e)
+        logger.warning("Не удалось сохранить в test_statistics: %s", e, exc_info=True)
 
     lang = attempt["language"] or "ru"
 
