@@ -458,49 +458,101 @@ async def _notify_user_grant(bot: Bot, target_tg_id: int,
 @router.callback_query(F.data == "opens:list", IsAdmin())
 async def cb_opens_list(call: CallbackQuery, state: FSMContext):
     await state.clear()
-    rows = db.fetchall("""
-        SELECT p.user_tg_id, p.granted_at, p.test_id,
+    await _render_opens_list(call, page=1)
+
+
+@router.callback_query(F.data.startswith("opens:list:"), IsAdmin())
+async def cb_opens_list_page(call: CallbackQuery, state: FSMContext):
+    try:
+        page = int(call.data.split(":")[2])
+    except (ValueError, IndexError):
+        page = 1
+    await _render_opens_list(call, page=page)
+
+
+async def _render_opens_list(call: CallbackQuery, page: int = 1):
+    """Список юзеров с приватным доступом, пагинация по 20."""
+    PER_PAGE = 20
+    # Получаем всех юзеров (DISTINCT) с группировкой по их тестам
+    all_rows = db.fetchall("""
+        SELECT p.user_tg_id, p.granted_at, p.test_id, p.expires_at,
                u.username, u.first_name,
                t.title AS test_title
         FROM private_test_access p
         LEFT JOIN users u ON u.tg_id = p.user_tg_id
         LEFT JOIN tests t ON t.id = p.test_id
-        ORDER BY p.granted_at DESC LIMIT 100
+        ORDER BY p.granted_at DESC
     """)
 
-    if not rows:
+    if not all_rows:
         text = "📋 <b>Список пользователей с приватным доступом</b>\n\n<i>Пока никому не выдавали.</i>"
-    else:
-        # Группируем по юзеру
-        from collections import defaultdict
-        by_user = defaultdict(list)
-        users = {}
-        for r in rows:
-            tg = r['user_tg_id']
-            users[tg] = r
-            by_user[tg].append(r['test_title'] or f"#{r['test_id']}")
+        kb = InlineKeyboardBuilder()
+        kb.button(text="↩️ Назад", callback_data="opens:back")
+        kb.adjust(1)
+        try:
+            await call.message.edit_text(text, reply_markup=kb.as_markup(),
+                                          parse_mode="HTML")
+        except Exception:
+            await call.message.answer(text, reply_markup=kb.as_markup(),
+                                       parse_mode="HTML")
+        await call.answer()
+        return
 
-        lines = [f"📋 <b>Пользователи с приватным доступом ({len(by_user)}):</b>\n"]
-        for tg, tests in list(by_user.items())[:20]:
-            u = users[tg]
-            name = ("@" + u['username']) if u['username'] else (u['first_name'] or f"id{tg}")
-            lines.append(f"<b>{utils.escape_html(name)}</b>  (<code>{tg}</code>)")
-            for t_name in tests[:3]:
-                lines.append(f"  • {utils.escape_html(t_name[:40])}")
-            if len(tests) > 3:
-                lines.append(f"  • <i>…ещё {len(tests) - 3}</i>")
-            lines.append("")
-        text = "\n".join(lines)
+    # Группируем по юзеру
+    from collections import defaultdict
+    by_user = defaultdict(list)
+    users = {}
+    for r in all_rows:
+        tg = r['user_tg_id']
+        users[tg] = r
+        by_user[tg].append(r['test_title'] or f"#{r['test_id']}")
 
+    user_list = list(by_user.items())  # [(tg_id, [tests])]
+    total_users = len(user_list)
+    total_pages = max(1, (total_users + PER_PAGE - 1) // PER_PAGE)
+    page = max(1, min(page, total_pages))
+    start = (page - 1) * PER_PAGE
+    end = start + PER_PAGE
+    page_users = user_list[start:end]
+
+    lines = [
+        f"📋 <b>Пользователи с приватным доступом</b>",
+        f"Всего: {total_users}    Страница {page}/{total_pages}\n"
+    ]
+    for tg, tests in page_users:
+        u = users[tg]
+        name = ("@" + u['username']) if u['username'] else (u['first_name'] or f"id{tg}")
+        lines.append(f"<b>{utils.escape_html(name)}</b>  (<code>{tg}</code>)")
+        # Показываем максимум 2 теста на пользователя
+        for t_name in tests[:2]:
+            lines.append(f"  • {utils.escape_html(t_name[:35])}")
+        if len(tests) > 2:
+            lines.append(f"  • <i>…ещё {len(tests) - 2}</i>")
+        lines.append("")
+    text = "\n".join(lines)
+
+    # Кнопки пагинации
     kb = InlineKeyboardBuilder()
-    kb.button(text="↩️ Назад", callback_data="opens:back")
-    kb.adjust(1)
+    nav_row = []
+    if page > 1:
+        kb.button(text="‹ Назад", callback_data=f"opens:list:{page-1}")
+    kb.button(text=f"{page}/{total_pages}", callback_data="opens:noop")
+    if page < total_pages:
+        kb.button(text="Вперёд ›", callback_data=f"opens:list:{page+1}")
+    kb.adjust(3)
+    kb.row(InlineKeyboardButton(text="↩️ Назад в меню", callback_data="opens:back"))
+
     try:
         await call.message.edit_text(text, reply_markup=kb.as_markup(),
                                        parse_mode="HTML")
     except Exception:
         await call.message.answer(text, reply_markup=kb.as_markup(),
                                     parse_mode="HTML")
+    await call.answer()
+
+
+@router.callback_query(F.data == "opens:noop", IsAdmin())
+async def cb_opens_noop(call: CallbackQuery):
     await call.answer()
 
 
