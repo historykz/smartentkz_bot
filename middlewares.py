@@ -34,12 +34,19 @@ class AntiSpamMiddleware(BaseMiddleware):
         if not user:
             return await handler(event, data)
 
-        # Пропускаем без проверки: Poll-сообщения и пересланные (массовый импорт админом).
+        # Пропускаем без проверки: Poll-сообщения и пересланные.
         if isinstance(event, Message):
             if event.poll is not None:
                 return await handler(event, data)
             if event.forward_origin is not None or event.forward_from is not None \
                     or event.forward_from_chat is not None:
+                return await handler(event, data)
+
+        # ВАЖНЫЕ callback'и пропускаем без anti-spam:
+        # онбординг, выбор языка, отмена — иначе юзер не сможет пройти первый /start
+        if isinstance(event, CallbackQuery) and event.data:
+            critical_prefixes = ("onb:", "setlang:", "cancel")
+            if any(event.data.startswith(p) for p in critical_prefixes):
                 return await handler(event, data)
 
         # Пропускаем админов — у них могут быть массовые действия
@@ -53,11 +60,9 @@ class AntiSpamMiddleware(BaseMiddleware):
         now = time.monotonic()
         last = self._last.get(user.id, 0)
         if now - last < ANTISPAM_COOLDOWN_SECONDS:
-            # CRITICAL: для callback'а ОБЯЗАТЕЛЬНО снять «загрузку»,
-            # иначе юзер видит вечную загрузку
             if isinstance(event, CallbackQuery):
                 try:
-                    await event.answer()  # тихо снимаем загрузку
+                    await event.answer()
                 except Exception:
                     pass
             return
