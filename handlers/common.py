@@ -116,20 +116,15 @@ async def cmd_start(message: Message, state: FSMContext, user: dict):
             pass
         return
 
-    # Проверяем — прошёл ли юзер онбординг (для новых юзеров)
-    from handlers import onboarding as _onb
-    onboarded = _onb.is_onboarded(message.from_user.id)
-
-    if not onboarded:
-        # Всегда показываем выбор языка — даже если язык уже задан в БД
-        # потому что юзер ещё не прошёл онбординг
+    # Если язык ещё не выбран — спрашиваем
+    if not user.get('language'):
         await message.answer(
             "🌐 <b>Выберите язык</b> · <b>Тілді таңдаңыз</b>",
             reply_markup=language_kb(), parse_mode="HTML")
         await state.set_state(CommonStates.choosing_language)
         return
 
-    # Юзер уже всё прошёл — показываем главное меню
+    # Сразу главное меню
     await message.answer(
         t("main_menu", lang),
         reply_markup=main_menu_kb(lang, utils.is_admin(message.from_user.id)),
@@ -252,21 +247,44 @@ async def cb_set_language(call: CallbackQuery, state: FSMContext, user: dict):
             await state.set_state(None)
             return
 
-    # Проверяем — прошёл ли юзер онбординг
-    from handlers import onboarding as _onb
-    if not _onb.is_onboarded(call.from_user.id):
-        # ВАЖНО: сначала сбрасываем state, потом запускаем онбординг
-        # Иначе callback'и онбординга могут не доходить из-за висящего FSM
-        await state.set_state(None)
-        await state.clear()
-        await _onb.start_onboarding(call.message, user)
-        return
+    # Краткая инструкция + сразу главное меню
+    await state.set_state(None)
+    await state.clear()
 
+    if lang == "kz":
+        intro = (
+            "👋 <b>Сәлемдесу!</b>\n\n"
+            "Мен сенің ҰБТ-ға дайындалуға көмекшің. Мұнда сен:\n\n"
+            "📚 <b>Тесттер</b> — пәндер бойынша таймермен тапсырамыз\n"
+            "⚔️ <b>Дуэль</b> — басқа оқушылармен 1-ге-1 жарыс\n"
+            "🏆 <b>Рейтинг</b> — топ-100 ойыншы\n"
+            "📊 <b>Менің нәтижелерім</b> — жеке тарихың\n\n"
+            "📢 Каналға жазылуды ұмытпа: @ent_biologydariga\n\n"
+            "⚙️ <b>Тілді ауыстыру:</b> «👤 Профиль» → «🌐 Тілді ауыстыру»\n\n"
+            "ҰБТ-да сәттілік! 🚀"
+        )
+    else:
+        intro = (
+            "👋 <b>Салют!</b>\n\n"
+            "Я твой помощник по ЕНТ. Здесь ты можешь:\n\n"
+            "📚 <b>Тесты</b> — решать с настоящим таймером по предметам\n"
+            "⚔️ <b>Дуэль</b> — 1-на-1 с другими учениками\n"
+            "🏆 <b>Рейтинг</b> — топ-100 игроков\n"
+            "📊 <b>Мои результаты</b> — твоя личная история\n\n"
+            "📢 Подпишись на канал: @ent_biologydariga\n\n"
+            "⚙️ <b>Смена языка:</b> «👤 Профиль» → «🌐 Сменить язык»\n\n"
+            "Удачи на ЕНТ! 🚀"
+        )
+
+    # Отправляем инструкцию
+    await call.message.answer(intro, parse_mode="HTML",
+                                disable_web_page_preview=True)
+
+    # И сразу главное меню
     await call.message.answer(
         t("main_menu", lang),
         reply_markup=main_menu_kb(lang, utils.is_admin(call.from_user.id)),
     )
-    await state.set_state(None)
 
 
 @router.message(Command("cancel"))
@@ -329,10 +347,39 @@ async def cmd_help(message: Message, user: dict):
 
 @router.callback_query(F.data == "m:help")
 async def cb_help(call: CallbackQuery, user: dict):
-    """Помощь = повторно показать онбординг."""
-    from handlers import onboarding as _onb
-    # Сбрасываем флаг, чтобы можно было снова пройти онбординг
-    await _onb.show_screen(call, user, 1)
+    """Помощь — короткий текст с инструкцией."""
+    lang = _resolve_lang(user)
+    if lang == "kz":
+        text = (
+            "ℹ️ <b>Қалай қолдану керек?</b>\n\n"
+            "📚 <b>Тесттер</b> — пәнді таңда → тестті бас → «▶️ Тестті өту»\n\n"
+            "⚔️ <b>Дуэль</b> — «🎯 Қарсылас тап» → 1-ге-1 жарыс\n\n"
+            "🏆 <b>Рейтинг</b> — топ-100 ойыншы\n\n"
+            "📊 <b>Менің нәтижелерім</b> — жеке тарихың\n\n"
+            "📢 Канал: @ent_biologydariga\n"
+            "💬 Сұрақтар: «🛠 Техқолдау»\n\n"
+            "⚙️ <b>Тілді ауыстыру:</b> «👤 Профиль» → «🌐 Тілді ауыстыру»"
+        )
+    else:
+        text = (
+            "ℹ️ <b>Как пользоваться ботом?</b>\n\n"
+            "📚 <b>Тесты</b> — выбери предмет → тест → «▶️ Пройти тест»\n\n"
+            "⚔️ <b>Дуэль</b> — «🎯 Найти соперника» → 1-на-1 с другим игроком\n\n"
+            "🏆 <b>Рейтинг</b> — топ-100 игроков\n\n"
+            "📊 <b>Мои результаты</b> — твоя личная история тестов\n\n"
+            "📢 Канал: @ent_biologydariga\n"
+            "💬 Вопросы: «🛠 Техподдержка»\n\n"
+            "⚙️ <b>Смена языка:</b> «👤 Профиль» → «🌐 Сменить язык»"
+        )
+    try:
+        await call.message.edit_text(text, parse_mode="HTML",
+                                       reply_markup=main_menu_kb(lang, utils.is_admin(call.from_user.id)),
+                                       disable_web_page_preview=True)
+    except Exception:
+        await call.message.answer(text, parse_mode="HTML",
+                                    reply_markup=main_menu_kb(lang, utils.is_admin(call.from_user.id)),
+                                    disable_web_page_preview=True)
+    await call.answer()
 
 
 @router.callback_query(F.data == "m:support")
