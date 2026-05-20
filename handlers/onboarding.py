@@ -1,6 +1,6 @@
 """
-Онбординг для новых юзеров. 4 экрана с навигацией.
-RU + KZ.
+Онбординг — 4 экрана с навигацией. RU + KZ.
+Запускается через cb_onb_start_X из выбора языка.
 """
 import logging
 
@@ -74,9 +74,8 @@ TEXTS = {
             "📚 <b>ТЕСТТЕР — ең басты</b>\n\n"
             "«📚 Тесттер» → пәнді таңда → нақты тестті таңда → "
             "«▶️ Тестті өту» бас.\n\n"
-            "Бот сұрақтарды бір-бірлеп жібереді — викторина сияқты.\n\n"
-            "⏱ Әр сұраққа таймер. Үлгермесең — өткізіледі.\n\n"
-            "Соңында нәтижеңді көресің."
+            "Бот сұрақтарды бір-бірлеп жібереді.\n\n"
+            "⏱ Әр сұраққа таймер. Үлгермесең — өткізіледі."
         ),
         "screen_3": (
             "⚔️ <b>ДУЭЛЬ — 1-ге-1</b>\n\n"
@@ -87,9 +86,8 @@ TEXTS = {
         ),
         "screen_4": (
             "🔐 <b>ЖАБЫҚ ТЕСТТЕР</b>\n\n"
-            "Админ рұқсат берсе — 🎉 хабарлама келеді. "
-            "Каталогтан «🔐 Менің жабық тесттерім» бөлімінен тап.\n\n"
-            "📢 <b>КАНАЛҒА ЖАЗЫЛ</b> @ent_biologydariga — сливтер мен талдаулар.\n\n"
+            "Админ рұқсат берсе — 🎉 хабарлама келеді.\n\n"
+            "📢 <b>КАНАЛҒА ЖАЗЫЛ</b> @ent_biologydariga\n\n"
             "💬 Сұрақтар → «🛠 Техқолдау».\n\n"
             "━━━━━━━━━━━━━━━━━━━━━\n"
             "⚙️ <b>ТІЛДІ АУЫСТЫРУ</b>\n"
@@ -108,6 +106,27 @@ TEXTS = {
 
 def _txt(lang: str, key: str) -> str:
     return TEXTS.get(lang, TEXTS["ru"]).get(key) or TEXTS["ru"].get(key, key)
+
+
+def _get_user_lang(tg_id: int) -> str:
+    """Достаём язык юзера из БД."""
+    try:
+        row = db.fetchone("SELECT language, first_name FROM users WHERE tg_id=?", (tg_id,))
+        if row and row.get('language'):
+            return row['language']
+    except Exception:
+        pass
+    return 'ru'
+
+
+def _get_user_name(tg_id: int, lang: str = 'ru') -> str:
+    try:
+        row = db.fetchone("SELECT first_name FROM users WHERE tg_id=?", (tg_id,))
+        if row and row.get('first_name'):
+            return row['first_name']
+    except Exception:
+        pass
+    return "друг" if lang == "ru" else "досым"
 
 
 def _build_keyboard(lang: str, screen: int) -> InlineKeyboardMarkup:
@@ -130,80 +149,84 @@ def _build_keyboard(lang: str, screen: int) -> InlineKeyboardMarkup:
     return kb.as_markup()
 
 
-async def start_onboarding(message: Message, user: dict):
-    lang = user.get('language') or 'ru'
-    name = user.get('first_name') or ("друг" if lang == "ru" else "досым")
+async def start_onboarding(message: Message, user: dict = None):
+    """Запуск онбординга с экрана 1."""
+    tg_id = message.from_user.id
+    lang = (user or {}).get('language') or _get_user_lang(tg_id)
+    name = (user or {}).get('first_name') or _get_user_name(tg_id, lang)
     text = _txt(lang, "screen_1").format(name=utils.escape_html(name))
     try:
         await message.answer(text, reply_markup=_build_keyboard(lang, 1),
                               parse_mode="HTML")
     except Exception as e:
-        log.exception("start_onboarding failed: %s", e)
-
-
-async def _show_screen(call: CallbackQuery, user: dict, screen: int):
-    lang = user.get('language') or 'ru'
-    name = user.get('first_name') or ("друг" if lang == "ru" else "досым")
-    text = _txt(lang, f"screen_{screen}")
-    if screen == 1:
-        text = text.format(name=utils.escape_html(name))
-    kb = _build_keyboard(lang, screen)
-    try:
-        await call.message.edit_text(text, reply_markup=kb, parse_mode="HTML")
-    except Exception:
-        try:
-            await call.message.answer(text, reply_markup=kb, parse_mode="HTML")
-        except Exception as e:
-            log.warning("show_screen error: %s", e)
+        log.exception("start_onboarding: %s", e)
 
 
 @router.callback_query(F.data.startswith("onb:"))
-async def cb_onboarding(call: CallbackQuery, user: dict = None, state: FSMContext = None):
-    """Обработка кнопок онбординга. Crash-proof."""
-    log.info("onb callback: %s", call.data)
+async def cb_onboarding(call: CallbackQuery, **kwargs):
+    """ВСЕ кнопки онбординга. Не зависит от middleware параметров."""
+    log.info("=== ONB CALLBACK: %s from tg_id=%s ===",
+              call.data, call.from_user.id if call.from_user else None)
+
+    # Снимем загрузку сразу
     try:
-        if state:
-            await state.clear()
+        await call.answer()
     except Exception:
         pass
 
-    if user is None:
-        user = {}
+    # Сброс FSM-состояния — без него callback может не доходить
+    state = kwargs.get('state')
+    if state:
+        try:
+            await state.set_state(None)
+        except Exception:
+            pass
+        try:
+            await state.clear()
+        except Exception:
+            pass
 
     try:
         arg = call.data.split(":")[1]
     except (ValueError, IndexError):
-        try:
-            await call.answer()
-        except Exception:
-            pass
         return
 
-    lang = user.get('language') or 'ru'
+    tg_id = call.from_user.id if call.from_user else 0
+    lang = _get_user_lang(tg_id)
+    name = _get_user_name(tg_id, lang)
 
+    # Экран по номеру
     if arg.isdigit():
         screen = int(arg)
         if 1 <= screen <= 4:
-            await _show_screen(call, user, screen)
+            text = _txt(lang, f"screen_{screen}")
+            if screen == 1:
+                text = text.format(name=utils.escape_html(name))
+            kb = _build_keyboard(lang, screen)
             try:
-                await call.answer()
-            except Exception:
-                pass
+                await call.message.edit_text(text, reply_markup=kb, parse_mode="HTML")
+            except Exception as e:
+                log.warning("edit failed (%s), sending new", e)
+                try:
+                    await call.message.answer(text, reply_markup=kb, parse_mode="HTML")
+                except Exception as e2:
+                    log.warning("send also failed: %s", e2)
             return
 
+    # Завершение
     if arg == "done":
         try:
             db.execute(
                 "UPDATE users SET onboarded_at=? WHERE tg_id=?",
-                (utils.now_iso(), call.from_user.id))
+                (utils.now_iso(), tg_id))
         except Exception as e:
-            log.warning("mark onboarded: %s", e)
+            log.warning("mark onboarded failed: %s", e)
 
         from keyboards import main_menu_kb
         from locales import t as _t
         is_a = False
         try:
-            is_a = utils.is_admin(call.from_user.id)
+            is_a = utils.is_admin(tg_id)
         except Exception:
             pass
         text = _t("main_menu", lang)
@@ -214,17 +237,7 @@ async def cb_onboarding(call: CallbackQuery, user: dict = None, state: FSMContex
             try:
                 await call.message.answer(text, reply_markup=kb, parse_mode="HTML")
             except Exception as e:
-                log.warning("done send error: %s", e)
-        try:
-            await call.answer()
-        except Exception:
-            pass
-        return
-
-    try:
-        await call.answer()
-    except Exception:
-        pass
+                log.warning("done send: %s", e)
 
 
 def is_onboarded(tg_id: int) -> bool:
@@ -235,3 +248,11 @@ def is_onboarded(tg_id: int) -> bool:
         return bool(row.get('onboarded_at'))
     except Exception:
         return False
+
+
+def reset_onboarding(tg_id: int):
+    """Сбросить флаг — для команды /restart_onboarding или принудительного показа."""
+    try:
+        db.execute("UPDATE users SET onboarded_at=NULL WHERE tg_id=?", (tg_id,))
+    except Exception:
+        pass
