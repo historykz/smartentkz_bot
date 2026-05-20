@@ -136,6 +136,22 @@ async def cmd_start(message: Message, state: FSMContext, user: dict):
     )
 
 
+@router.message(Command("restart"))
+async def cmd_restart(message: Message, state: FSMContext, user: dict):
+    """Сбросить онбординг и пройти заново — для отладки/повтора."""
+    await state.clear()
+    from handlers import onboarding as _onb
+    _onb.reset_onboarding(message.from_user.id)
+    await message.answer(
+        "🔄 Онбординг сброшен. Сейчас покажу заново.\n\n"
+        "🔄 Кіріспе сабақ қалпына келтірілді.")
+    # Сразу спрашиваем язык
+    await message.answer(
+        "🌐 <b>Выберите язык</b> · <b>Тілді таңдаңыз</b>",
+        reply_markup=language_kb(), parse_mode="HTML")
+    await state.set_state(CommonStates.choosing_language)
+
+
 async def _apply_pending_and_show_menu(message: Message, state: FSMContext, user: dict):
     """Применить отложенные действия из deep-link после выбора языка."""
     lang = _resolve_lang(user)
@@ -239,9 +255,11 @@ async def cb_set_language(call: CallbackQuery, state: FSMContext, user: dict):
     # Проверяем — прошёл ли юзер онбординг
     from handlers import onboarding as _onb
     if not _onb.is_onboarded(call.from_user.id):
-        # Запускаем онбординг вместо главного меню
-        await _onb.start_onboarding(call.message, user)
+        # ВАЖНО: сначала сбрасываем state, потом запускаем онбординг
+        # Иначе callback'и онбординга могут не доходить из-за висящего FSM
         await state.set_state(None)
+        await state.clear()
+        await _onb.start_onboarding(call.message, user)
         return
 
     await call.message.answer(
