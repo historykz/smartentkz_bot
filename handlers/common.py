@@ -115,17 +115,21 @@ async def cmd_start(message: Message, state: FSMContext, user: dict):
         except Exception:
             pass
         return
-    if not user.get('language'):
-        await message.answer(t("choose_language", lang), reply_markup=language_kb())
-        await state.set_state(CommonStates.choosing_language)
-        return
 
     # Проверяем — прошёл ли юзер онбординг (для новых юзеров)
     from handlers import onboarding as _onb
-    if not _onb.is_onboarded(message.from_user.id):
-        await _onb.start_onboarding(message, user)
+    onboarded = _onb.is_onboarded(message.from_user.id)
+
+    if not onboarded:
+        # Всегда показываем выбор языка — даже если язык уже задан в БД
+        # потому что юзер ещё не прошёл онбординг
+        await message.answer(
+            "🌐 <b>Выберите язык</b> · <b>Тілді таңдаңыз</b>",
+            reply_markup=language_kb(), parse_mode="HTML")
+        await state.set_state(CommonStates.choosing_language)
         return
 
+    # Юзер уже всё прошёл — показываем главное меню
     await message.answer(
         t("main_menu", lang),
         reply_markup=main_menu_kb(lang, utils.is_admin(message.from_user.id)),
