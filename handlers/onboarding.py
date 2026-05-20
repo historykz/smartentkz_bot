@@ -165,79 +165,108 @@ async def start_onboarding(message: Message, user: dict = None):
 @router.callback_query(F.data.startswith("onb:"))
 async def cb_onboarding(call: CallbackQuery, **kwargs):
     """ВСЕ кнопки онбординга. Не зависит от middleware параметров."""
-    log.info("=== ONB CALLBACK: %s from tg_id=%s ===",
-              call.data, call.from_user.id if call.from_user else None)
-
-    # Снимем загрузку сразу
+    # Сначала ОТВЕТЬ на callback — Telegram перестанет показывать «загрузка»
     try:
         await call.answer()
-    except Exception:
-        pass
+    except Exception as e:
+        log.warning("call.answer failed: %s", e)
 
-    # Сброс FSM-состояния — без него callback может не доходить
-    state = kwargs.get('state')
-    if state:
-        try:
-            await state.set_state(None)
-        except Exception:
-            pass
-        try:
-            await state.clear()
-        except Exception:
-            pass
+    # Логируем что callback пришёл
+    log.info("=== ONB CALLBACK ===  data=%s  tg_id=%s",
+              call.data,
+              call.from_user.id if call.from_user else 'None')
 
+    # Защита от всех ошибок
     try:
-        arg = call.data.split(":")[1]
-    except (ValueError, IndexError):
-        return
-
-    tg_id = call.from_user.id if call.from_user else 0
-    lang = _get_user_lang(tg_id)
-    name = _get_user_name(tg_id, lang)
-
-    # Экран по номеру
-    if arg.isdigit():
-        screen = int(arg)
-        if 1 <= screen <= 4:
-            text = _txt(lang, f"screen_{screen}")
-            if screen == 1:
-                text = text.format(name=utils.escape_html(name))
-            kb = _build_keyboard(lang, screen)
+        # Сброс FSM-состояния
+        state = kwargs.get('state')
+        if state:
             try:
-                await call.message.edit_text(text, reply_markup=kb, parse_mode="HTML")
-            except Exception as e:
-                log.warning("edit failed (%s), sending new", e)
-                try:
-                    await call.message.answer(text, reply_markup=kb, parse_mode="HTML")
-                except Exception as e2:
-                    log.warning("send also failed: %s", e2)
+                await state.set_state(None)
+            except Exception:
+                pass
+
+        # Парсинг callback
+        try:
+            arg = call.data.split(":")[1]
+        except (ValueError, IndexError):
+            log.warning("Bad callback data: %s", call.data)
             return
 
-    # Завершение
-    if arg == "done":
-        try:
-            db.execute(
-                "UPDATE users SET onboarded_at=? WHERE tg_id=?",
-                (utils.now_iso(), tg_id))
-        except Exception as e:
-            log.warning("mark onboarded failed: %s", e)
+        tg_id = call.from_user.id if call.from_user else 0
+        lang = _get_user_lang(tg_id)
+        name = _get_user_name(tg_id, lang)
 
-        from keyboards import main_menu_kb
-        from locales import t as _t
-        is_a = False
+        # Экран по номеру
+        if arg.isdigit():
+            screen = int(arg)
+            if 1 <= screen <= 4:
+                text = _txt(lang, f"screen_{screen}")
+                if screen == 1:
+                    text = text.format(name=utils.escape_html(name))
+                kb = _build_keyboard(lang, screen)
+
+                # Пытаемся отредактировать или отправить
+                sent = False
+                try:
+                    await call.message.edit_text(text, reply_markup=kb,
+                                                   parse_mode="HTML")
+                    sent = True
+                except Exception as e:
+                    log.warning("edit_text failed: %s", e)
+
+                if not sent:
+                    try:
+                        await call.message.answer(text, reply_markup=kb,
+                                                    parse_mode="HTML")
+                    except Exception as e:
+                        log.warning("answer failed: %s", e)
+                        # Последняя надежда — через bot
+                        try:
+                            await call.bot.send_message(
+                                call.from_user.id, text, reply_markup=kb,
+                                parse_mode="HTML")
+                        except Exception as e2:
+                            log.exception("All sends failed: %s", e2)
+                return
+
+        # Завершение
+        if arg == "done":
+            try:
+                db.execute(
+                    "UPDATE users SET onboarded_at=? WHERE tg_id=?",
+                    (utils.now_iso(), tg_id))
+            except Exception as e:
+                log.warning("mark onboarded failed: %s", e)
+
+            # Открываем главное меню
+            try:
+                from keyboards import main_menu_kb
+                from locales import t as _t
+                is_a = False
+                try:
+                    is_a = utils.is_admin(tg_id)
+                except Exception:
+                    pass
+                text = _t("main_menu", lang)
+                kb = main_menu_kb(lang, is_a)
+                try:
+                    await call.message.edit_text(text, reply_markup=kb)
+                except Exception:
+                    try:
+                        await call.message.answer(text, reply_markup=kb)
+                    except Exception:
+                        await call.bot.send_message(tg_id, text, reply_markup=kb)
+            except Exception as e:
+                log.exception("done finalize failed: %s", e)
+            return
+
+    except Exception as e:
+        log.exception("=== ONB CALLBACK FATAL ===: %s", e)
         try:
-            is_a = utils.is_admin(tg_id)
+            await call.message.answer(f"⚠️ Ошибка онбординга: {e}")
         except Exception:
             pass
-        text = _t("main_menu", lang)
-        kb = main_menu_kb(lang, is_a)
-        try:
-            await call.message.edit_text(text, reply_markup=kb, parse_mode="HTML")
-        except Exception:
-            try:
-                await call.message.answer(text, reply_markup=kb, parse_mode="HTML")
-            except Exception as e:
-                log.warning("done send: %s", e)
 
 
 def is_onboarded(tg_id: int) -> bool:
