@@ -50,7 +50,7 @@ def _list_active_tests(language: str, ttype_filter: str = None) -> list[dict]:
 
 @router.callback_query(F.data == "m:tests")
 async def cb_tests_menu(call: CallbackQuery, user: dict):
-    """Главный экран каталога — показывает разделы."""
+    """Каталог тестов — показывает разделы."""
     lang = _resolve_lang(user)
     from handlers import categories, private_access as _pa
 
@@ -58,28 +58,7 @@ async def cb_tests_menu(call: CallbackQuery, user: dict):
     private_tests = _pa.list_user_private_tests(call.from_user.id)
     tests_no_cat = categories.get_tests_without_category(lang)
 
-    if lang == "kz":
-        title_main = "📚 <b>Тесттер каталогы</b>"
-        hint_choose = ("Қай пәннен жаттыққың келетінін таңда — ішінде нақты "
-                        "тесттер болады.\n\n"
-                        "📌 Бөлім жанындағы сан — онда қанша тест бар.")
-        hint_no_cats = "<i>Бөлімдер жоқ — қолжетімді тесттер төменде.</i>"
-        hint_empty = "<i>Әзірге бірде-бір тест жоқ. Кейінірек қайта кір.</i>"
-    else:
-        title_main = "📚 <b>Каталог тестов</b>"
-        hint_choose = ("Выбери предмет в котором хочешь потренироваться — "
-                        "внутри будут конкретные тесты.\n\n"
-                        "📌 Цифра рядом с разделом — сколько там тестов.")
-        hint_no_cats = "<i>Разделов пока нет — все доступные тесты ниже.</i>"
-        hint_empty = "<i>Пока нет ни одного теста. Загляни попозже.</i>"
-
-    text = title_main + "\n\n"
-    if cats:
-        text += hint_choose
-    elif tests_no_cat or private_tests:
-        text += hint_no_cats
-    else:
-        text += hint_empty
+    text = "📚 <b>Каталог тестов</b>" if lang != "kz" else "📚 <b>Тесттер каталогы</b>"
 
     kb = InlineKeyboardBuilder()
 
@@ -105,7 +84,7 @@ async def cb_tests_menu(call: CallbackQuery, user: dict):
         kb.button(text=f"📭 Без раздела ({len(tests_no_cat)})",
                   callback_data="m:cat:none")
 
-    kb.button(text="↩️ Назад в меню", callback_data="m:menu")
+    kb.button(text=t("btn_back", lang), callback_data="m:menu")
     kb.adjust(1)
 
     try:
@@ -117,7 +96,7 @@ async def cb_tests_menu(call: CallbackQuery, user: dict):
 
 @router.callback_query(F.data.startswith("m:cat:"))
 async def cb_tests_by_category(call: CallbackQuery, user: dict):
-    """Список тестов в выбранном разделе."""
+    """Список тестов в выбранном разделе — простой список без текста."""
     lang = _resolve_lang(user)
     from handlers import categories
     arg = call.data.split(":")[2]
@@ -138,33 +117,16 @@ async def cb_tests_by_category(call: CallbackQuery, user: dict):
         emoji = cat.get('emoji') or '📚'
         cat_title = f"{emoji} {cat['name']}"
 
-    if lang == "kz":
-        hint = (f"Сен «{utils.escape_html(cat_title)}» бөлімін таңдадың 👍\n"
-                f"Төменде — тесттер тізімі. Сипаттамасы бар картаны "
-                f"көру үшін кез келгенін бас.\n\n"
-                f"📌 💎 белгісі бар тесттер — ақылы.")
-        empty_text = "<i>Бұл бөлімде әзірге тесттер жоқ.</i>"
-        back_btn = "↩️ Бөлімдерге"
-    else:
-        hint = (f"Ты выбрал «{utils.escape_html(cat_title)}» 👍\n"
-                f"Ниже — список тестов. Тапай любой, чтобы увидеть карточку "
-                f"с описанием.\n\n"
-                f"📌 Тесты со значком 💎 — платные.")
-        empty_text = "<i>В этом разделе пока нет тестов.</i>"
-        back_btn = "↩️ К разделам"
-
-    text = f"<b>{utils.escape_html(cat_title)}</b>\n\n"
-    if tests:
-        text += hint
-    else:
-        text += empty_text
+    text = f"<b>{utils.escape_html(cat_title)}</b>"
+    if not tests:
+        text += "\n\n<i>В этом разделе пока нет тестов.</i>"
 
     kb = InlineKeyboardBuilder()
     for tst in tests[:30]:
         t_title = (tst.get('title') or '—')[:50]
         prefix = "💎 " if tst.get('is_paid') else ""
         kb.button(text=f"{prefix}{t_title}", callback_data=f"opentest:{tst['id']}")
-    kb.button(text=back_btn, callback_data="m:tests")
+    kb.button(text="↩️ К разделам", callback_data="m:tests")
     kb.adjust(1)
 
     try:
