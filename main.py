@@ -23,9 +23,19 @@ import database
 from middlewares import UserContextMiddleware, AntiSpamMiddleware
 from handlers import (common, profile, user, quiz, duel,
                        homework, rating, inline, admin, group_quiz,
-                       private_access, categories, question_editor, autopub,
+                       private_access, categories, autopub,
                        appeals, profile_subjects, moderation, daily, notes,
                        backup, zip_import, payments, announce)
+
+# question_editor импортируем отдельно с защитой — если файл вдруг
+# не доехал на хостинг, бот всё равно стартует (без редактора вопросов).
+try:
+    from handlers import question_editor
+except ImportError as _qe_err:
+    import logging as _lg
+    _lg.getLogger(__name__).error(
+        "question_editor не загружен: %s — бот запустится без него", _qe_err)
+    question_editor = None
 
 
 def setup_logging() -> None:
@@ -81,15 +91,15 @@ async def main() -> None:
 
     # БД создаётся на старте автоматически
     database.init_db()
-    log.info("DB_PATH: %s", config.DB_PATH)
+    log.info("DB_PATH: %s", database.DB_PATH)
     # Предупреждение если БД лежит в репозитории (не Volume)
-    if not config.DB_PATH.startswith("/data") and not config.DB_PATH.startswith("/mnt"):
+    if not database.DB_PATH.startswith("/data") and not database.DB_PATH.startswith("/mnt"):
         log.warning(
-            "⚠️ DB_PATH=%s — БД лежит в репозитории и БУДЕТ СТЕРТА при следующем деплое! "
+            "⚠️ БД лежит локально (%s) и БУДЕТ СТЕРТА при следующем деплое! "
             "Создай Volume на Railway (Settings → Volumes), смонтируй на /data, "
             "и поставь переменную DB_PATH=/data/bot.db",
-            config.DB_PATH)
-    log.info("База данных инициализирована: %s", config.DB_PATH)
+            database.DB_PATH)
+    log.info("База данных инициализирована: %s", database.DB_PATH)
 
     # Обязательный канал — прописываем в required_channels, если задан
     if config.REQUIRED_CHANNEL:
@@ -188,7 +198,8 @@ async def main() -> None:
     dp.include_router(group_quiz.router)
     dp.include_router(private_access.router)
     dp.include_router(categories.router)
-    dp.include_router(question_editor.router)
+    if question_editor is not None:
+        dp.include_router(question_editor.router)
     dp.include_router(autopub.router)
     dp.include_router(backup.router)
     dp.include_router(zip_import.router)
