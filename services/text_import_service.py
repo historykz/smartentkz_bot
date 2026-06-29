@@ -49,3 +49,4 @@ def import_text_questions(test_id: int, raw_text: str,
             logger.exception("Ошибка при добавлении вопроса: %s", e)
             errors.append(f"Ошибка БД при добавлении: {e}")
     return added, errors
+
