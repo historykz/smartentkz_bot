@@ -22,6 +22,54 @@ router = Router(name="quiz")
 log = logging.getLogger(__name__)
 
 
+@router.callback_query(F.data.startswith("redoerr:"))
+async def cb_redo_errors(call: CallbackQuery):
+    """Повторить вопросы где ошибся (не засчитывается)."""
+    await call.answer()
+    try:
+        prev_attempt = int(call.data.split(":")[1])
+    except (ValueError, IndexError):
+        return
+    # Проверим владельца
+    import database as db
+    u = db.fetchone("SELECT id FROM users WHERE tg_id=?", (call.from_user.id,))
+    a = db.fetchone("SELECT * FROM test_attempts WHERE id=?", (prev_attempt,))
+    if not u or not a or a.get('user_id') != u['id']:
+        return
+    # Бесплатный повтор только первый раз — дальше за звёзды
+    used = db.fetchone(
+        "SELECT COUNT(*) AS c FROM test_attempts "
+        "WHERE user_id=? AND test_id=? AND attempt_num=999",
+        (u['id'], a['test_id']))
+    if ((used['c'] if used else 0) or 0) >= 1:
+        from services import payment_service as _pms
+        from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
+        kb = InlineKeyboardMarkup(inline_keyboard=[[
+            InlineKeyboardButton(
+                text=f"🔁 Повторить за {_pms.REDO_PRICE_STARS} ⭐️",
+                callback_data=f"buyredo:{prev_attempt}")]])
+        await call.message.answer(
+            "🔁 Бесплатный повтор уже использован.\n"
+            f"Следующий повтор — {_pms.REDO_PRICE_STARS} ⭐️",
+            reply_markup=kb)
+        return
+    new_attempt = test_runner.create_redo_attempt(prev_attempt)
+    if not new_attempt:
+        await call.answer("Нет ошибок для повтора 🎉", show_alert=True)
+        return
+    try:
+        await call.message.answer(
+            "🔁 <b>Повтор ошибок</b>\n\n"
+            "Сейчас пройдёшь только те вопросы, где ошибся. "
+            "Эта попытка не влияет на статистику.",
+            parse_mode="HTML")
+    except Exception:
+        pass
+    await asyncio.sleep(1)
+    await test_runner.send_current_question(
+        call.bot, new_attempt, call.message.chat.id)
+
+
 # ============================
 # Личные ответы
 # ============================
@@ -133,6 +181,21 @@ async def cb_retake(call: CallbackQuery, user: dict):
             return
     attempt_id = test_runner.create_attempt(
         user['id'], test_id, lang, group_id=None, started_by_user_id=user['id'])
+    if not attempt_id:
+        # Возможно бан за апелляции
+        try:
+            from services import appeal_service
+            banned, until = appeal_service.is_user_banned(user['id'])
+            if banned:
+                await call.answer(
+                    "⛔ Ты временно отстранён от тестов за ложные апелляции.\n"
+                    f"Сможешь снова проходить после {until[:10]}.",
+                    show_alert=True)
+                return
+        except Exception:
+            pass
+        await call.answer("Не смог запустить тест.", show_alert=True)
+        return
     try:
         await call.message.delete()
     except Exception:
@@ -163,7 +226,7 @@ async def cb_review(call: CallbackQuery, user: dict):
 # Групповая викторина
 # ============================
 
-@router.message(Command("quiz"))
+@router.message(Command("quiz"), F.chat.type == "private")
 async def cmd_group_quiz(message: Message, command: CommandObject, user: dict):
     """В группе: /quiz <test_id> — начать набор группы для теста."""
     lang = user.get('language') or 'ru'
@@ -481,16 +544,25 @@ async def _finalize_group(bot: Bot, gqid: int, chat_id: int):
 
 @router.poll_answer()
 async def on_poll_answer(poll_answer: PollAnswer):
-    """Ответ из Quiz Poll — может быть личный или групповой тест."""
+    """Ответ из Quiz Poll — личный, групповой тест или смена правильного ответа админом."""
     try:
         bot = poll_answer.bot
         if bot is None:
             return
-        # Сначала пробуем как групповой
+        # Админский poll смены правильного ответа (question_editor)
+        try:
+            from handlers.question_editor import _correct_poll_map
+            if poll_answer.poll_id in _correct_poll_map:
+                from handlers import question_editor as _qe
+                await _qe.on_poll_answer_admin(poll_answer, bot)
+                return
+        except Exception:
+            pass
+        # Групповой
         from services import group_quiz_service
         await group_quiz_service.on_poll_answer(
             bot, poll_answer.poll_id, poll_answer.option_ids, poll_answer.user)
-        # Параллельно пробуем как личный — функция сама проверит маппинг
+        # Личный — функция сама проверит маппинг
         await test_runner.process_poll_answer(
             bot, poll_answer.poll_id, poll_answer.option_ids, poll_answer.user.id)
     except Exception as e:
