@@ -121,3 +121,4 @@ def format_top(rows: list[dict], lang: str, score_field: str = 'total_score',
                 extra = f" ({utils.escape_html(r['school'])})"
             lines.append(f"{prefix} {name}{extra} — <b>{r[score_field]}</b> {score_label}")
     return "\n".join(lines)
+
