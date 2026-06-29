@@ -132,6 +132,18 @@ async def cb_tests_menu(call: CallbackQuery, user: dict):
                       else "🎓 Выбрать профильные предметы"),
                 callback_data="m:change_subjects")
 
+    # Тесты без раздела — показываем всем (бесплатные/платные, не приватные)
+    no_cat_count = db.fetchone(
+        """SELECT COUNT(*) AS c FROM tests
+           WHERE category_id IS NULL AND status='active'
+             AND COALESCE(is_private,0)=0 AND language=?""", (lang,))['c']
+    if no_cat_count > 0:
+        has_any = True
+        kb.button(
+            text=(f"📭 Бөлімсіз тесттер ({no_cat_count})" if lang == "kz"
+                  else f"📭 Тесты без раздела ({no_cat_count})"),
+            callback_data="m:cat:none")
+
     kb.button(text=t("btn_back", lang), callback_data="m:menu")
     kb.adjust(1)
 
@@ -621,3 +633,4 @@ async def cb_stats(call: CallbackQuery, user: dict):
         await call.message.answer(text, reply_markup=kb, parse_mode="HTML",
                                     disable_web_page_preview=True)
     await call.answer()
+
