@@ -695,6 +695,72 @@ def init_db() -> None:
         except Exception:
             pass
 
+        # Серийный номер вопроса Q-NNNN
+        try:
+            cur.execute("ALTER TABLE questions ADD COLUMN serial_no TEXT")
+        except Exception:
+            pass
+        try:
+            cur.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_q_serial ON questions(serial_no)")
+        except Exception:
+            pass
+
+        # Предупреждения юзера + бан
+        try:
+            cur.execute("ALTER TABLE users ADD COLUMN appeal_warnings INTEGER DEFAULT 0")
+        except Exception:
+            pass
+        try:
+            cur.execute("ALTER TABLE users ADD COLUMN banned_until TEXT")
+        except Exception:
+            pass
+
+        try:
+            cur.execute("ALTER TABLE test_attempts ADD COLUMN paused_at TEXT")
+        except Exception:
+            pass
+
+        # Таблица апелляций
+        cur.execute("""
+        CREATE TABLE IF NOT EXISTS appeals (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            question_id INTEGER NOT NULL,
+            user_tg_id INTEGER NOT NULL,
+            user_text TEXT NOT NULL,
+            status TEXT DEFAULT 'pending',
+            created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+            resolved_by INTEGER,
+            resolved_at TEXT
+        );
+        """)
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_appeals_status ON appeals(status);")
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_appeals_q ON appeals(question_id);")
+
+        # Бэкфилл серийных номеров для существующих вопросов
+        try:
+            rows = cur.execute("SELECT id FROM questions WHERE serial_no IS NULL ORDER BY id").fetchall()
+            for r in rows:
+                qid = r[0] if isinstance(r, tuple) else r['id']
+                serial = f"Q-{qid:04d}"
+                cur.execute("UPDATE questions SET serial_no=? WHERE id=?", (serial, qid))
+        except Exception:
+            pass
+
+        # Триггер: автоназначение serial_no новым вопросам
+        try:
+            cur.execute("""
+                CREATE TRIGGER IF NOT EXISTS trg_q_serial
+                AFTER INSERT ON questions
+                WHEN NEW.serial_no IS NULL
+                BEGIN
+                    UPDATE questions
+                    SET serial_no = printf('Q-%04d', NEW.id)
+                    WHERE id = NEW.id;
+                END;
+            """)
+        except Exception:
+            pass
+
         # --- ПРИВАТНЫЙ ДОСТУП К ТЕСТАМ ---
         cur.execute("""
         CREATE TABLE IF NOT EXISTS private_test_access (
@@ -738,10 +804,100 @@ def init_db() -> None:
         except Exception:
             pass
 
+        # --- Обязательный предмет (виден всем) ---
+        try:
+            cur.execute("ALTER TABLE test_categories ADD COLUMN is_required INTEGER DEFAULT 0")
+        except Exception:
+            pass
+
+        # --- Профильные предметы юзера (CSV из category_id) ---
+        try:
+            cur.execute("ALTER TABLE users ADD COLUMN profile_subjects TEXT")
+        except Exception:
+            pass
+
         # --- Флаг прохождения онбординга ---
         try:
             cur.execute("ALTER TABLE users ADD COLUMN onboarded_at TEXT")
         except Exception:
             pass
+
+        # --- Фото в вопросах ---
+        try:
+            cur.execute("ALTER TABLE questions ADD COLUMN photo_file_id TEXT")
+        except Exception:
+            pass
+
+        # --- Модерация чата (баны/муты) ---
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS chat_moderation (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                chat_id INTEGER NOT NULL,
+                user_tg_id INTEGER NOT NULL,
+                username TEXT,
+                full_name TEXT,
+                action TEXT NOT NULL,
+                until_ts TEXT,
+                created_by INTEGER,
+                created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+                UNIQUE(chat_id, user_tg_id, action)
+            )
+        """)
+
+        # --- Цена в звёздах для тестов ---
+        try:
+            cur.execute("ALTER TABLE tests ADD COLUMN price_stars INTEGER DEFAULT 0")
+        except Exception:
+            pass
+
+        # --- Покупки (звёзды) ---
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS purchases (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_tg_id INTEGER NOT NULL,
+                kind TEXT NOT NULL,          -- test | category | gift | redo
+                test_id INTEGER,
+                category_id INTEGER,
+                gifted_to_tg_id INTEGER,     -- кому подарен (для gift)
+                stars_amount INTEGER DEFAULT 0,
+                charge_id TEXT,              -- telegram_payment_charge_id (для refund)
+                gift_code TEXT,              -- код для подарка по ссылке
+                created_at TEXT DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_purchases_user "
+                    "ON purchases(user_tg_id)")
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_purchases_test "
+                    "ON purchases(test_id)")
+
+        # --- Предупреждения за ссылки ---
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS link_warnings (
+                chat_id INTEGER NOT NULL,
+                user_tg_id INTEGER NOT NULL,
+                warns INTEGER DEFAULT 0,
+                updated_at TEXT DEFAULT CURRENT_TIMESTAMP,
+                PRIMARY KEY (chat_id, user_tg_id)
+            )
+        """)
+
+        # --- Очередь автопубликации (дублируем тут для надёжности) ---
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS autopub_queue (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                test_id INTEGER NOT NULL,
+                run_at TEXT NOT NULL,
+                status TEXT DEFAULT 'pending',
+                error TEXT DEFAULT '',
+                created_by INTEGER,
+                series_id TEXT DEFAULT '',
+                series_pos INTEGER DEFAULT 0,
+                series_total INTEGER DEFAULT 1,
+                series_test_ids TEXT DEFAULT '',
+                created_at TEXT DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_autopub_status_time "
+                    "ON autopub_queue(status, run_at)")
 
         logger.info("База данных инициализирована")
