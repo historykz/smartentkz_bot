@@ -83,24 +83,6 @@ async def on_my_chat_member(event: ChatMemberUpdated, bot: Bot):
             log.warning("Не удалось отправить приветствие в %s: %s", chat.id, e)
 
 
-@router.message(F.chat.type.in_({"group", "supergroup"}))
-async def on_group_message(message: Message):
-    """Любое сообщение в группе — обновляем seen_at и добавляем если новая."""
-    if not message.chat or message.chat.type not in ("group", "supergroup"):
-        return
-    chat = message.chat
-    existing = db.fetchone("SELECT chat_id FROM known_groups WHERE chat_id=?", (chat.id,))
-    if not existing:
-        db.execute(
-            """INSERT OR IGNORE INTO known_groups (chat_id, title, type, seen_at)
-               VALUES (?,?,?, CURRENT_TIMESTAMP)""",
-            (chat.id, chat.title or "", chat.type))
-    else:
-        db.execute(
-            "UPDATE known_groups SET title=?, seen_at=CURRENT_TIMESTAMP WHERE chat_id=?",
-            (chat.title or "", chat.id))
-
-
 # ============ /stop в группе ============
 
 @router.message(Command("stop"), F.chat.type.in_({"group", "supergroup"}))
@@ -145,6 +127,68 @@ async def cmd_stop_group(message: Message, bot: Bot):
                                     "автор теста или администратор бота.")
             except Exception:
                 pass
+
+
+# ============ Пауза / продолжение теста ============
+
+@router.message(Command("pause"), F.chat.type.in_({"group", "supergroup"}))
+async def cmd_pause_group(message: Message, bot: Bot):
+    requester = message.from_user.id if message.from_user else 0
+    if requester == 0 and message.sender_chat and \
+            message.sender_chat.id == message.chat.id:
+        requester = 0  # от имени группы — разрешаем
+    ok, key = await group_quiz_service.pause_quiz(
+        bot, message.chat.id, requester_tg_id=requester)
+    try:
+        await message.delete()
+    except Exception:
+        pass
+    if ok:
+        try:
+            await bot.send_message(
+                message.chat.id,
+                "⏸ <b>Тест на паузе.</b>\n"
+                "Чтобы продолжить — напишите <code>/resume</code>",
+                parse_mode="HTML")
+        except Exception:
+            pass
+    elif key == "no_rights":
+        try:
+            await bot.send_message(
+                message.chat.id,
+                "⛔ Паузу может поставить только админ или автор теста.")
+        except Exception:
+            pass
+    # no_active — молча
+
+
+@router.message(Command("resume"), F.chat.type.in_({"group", "supergroup"}))
+async def cmd_resume_group(message: Message, bot: Bot):
+    requester = message.from_user.id if message.from_user else 0
+    if requester == 0 and message.sender_chat and \
+            message.sender_chat.id == message.chat.id:
+        requester = 0
+    ok, key = await group_quiz_service.resume_quiz(
+        bot, message.chat.id, requester_tg_id=requester)
+    try:
+        await message.delete()
+    except Exception:
+        pass
+    if ok:
+        try:
+            await bot.send_message(
+                message.chat.id, "▶️ <b>Тест продолжается!</b>",
+                parse_mode="HTML")
+        except Exception:
+            pass
+    elif key == "no_rights":
+        try:
+            await bot.send_message(
+                message.chat.id,
+                "⛔ Продолжить может только админ или автор теста.")
+        except Exception:
+            pass
+    # no_paused — молча
 
 
 # ============ Запуск теста в группу ============
@@ -328,3 +372,56 @@ async def cb_gq_join(call: CallbackQuery):
             "already_in": "Вы уже в списке.",
         }
         await call.answer(msgs.get(key, "Не удалось присоединиться."), show_alert=False)
+
+
+# ============ Catch-all групповых сообщений (В САМОМ КОНЦЕ!) ============
+# Идёт последним чтобы не перехватывать /stop, /launch_ и другие команды.
+
+@router.message(F.chat.type.in_({"group", "supergroup"}))
+async def on_group_message(message: Message, bot: Bot):
+    """Любое прочее сообщение в группе — seen_at + антиссылки + антифлуд."""
+    if not message.chat or message.chat.type not in ("group", "supergroup"):
+        return
+    chat = message.chat
+    existing = db.fetchone("SELECT chat_id FROM known_groups WHERE chat_id=?", (chat.id,))
+    if not existing:
+        db.execute(
+            """INSERT OR IGNORE INTO known_groups (chat_id, title, type, seen_at)
+               VALUES (?,?,?, CURRENT_TIMESTAMP)""",
+            (chat.id, chat.title or "", chat.type))
+    else:
+        db.execute(
+            "UPDATE known_groups SET title=?, seen_at=CURRENT_TIMESTAMP WHERE chat_id=?",
+            (chat.title or "", chat.id))
+
+    # Блокировка лишних команд в группе: меню/тесты/старт недоступны.
+    # Разрешены только /stop и /launch_X (обработаны ранее) — сюда они не дойдут.
+    txt = (message.text or "").strip()
+    if txt.startswith("/"):
+        cmd = txt.split()[0].split("@")[0].lower().lstrip("/")
+        BLOCKED = {"start", "menu", "help", "quiz", "admin", "restart",
+                   "findq", "cancel", "refund"}
+        if cmd in BLOCKED or txt.startswith("/launch_"):
+            # удаляем команду чтобы не спамили/не нажимали
+            try:
+                await bot.delete_message(chat.id, message.message_id)
+            except Exception:
+                pass
+            # тихо игнорим (меню/тесты в чате недоступны)
+            if not txt.startswith("/launch_"):
+                return
+
+    # Антифлуд
+    try:
+        from handlers.moderation import check_antiflood
+        await check_antiflood(message, bot)
+    except Exception as e:
+        log.warning("antiflood check: %s", e)
+
+    # Антиссылки
+    try:
+        from handlers.moderation import check_antilink
+        await check_antilink(message, bot)
+    except Exception as e:
+        log.warning("antilink check: %s", e)
+
