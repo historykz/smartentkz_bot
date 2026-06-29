@@ -30,7 +30,7 @@ logger = logging.getLogger(__name__)
 # Конфиг
 MIN_PLAYERS = 2
 COUNTDOWN_SECONDS = 3
-LOBBY_TIMEOUT_SECONDS = 5 * 60  # 5 минут
+LOBBY_TIMEOUT_SECONDS = 10 * 60  # 10 минут
 
 # Активные таймеры на следующий вопрос: group_quiz_id -> Task
 _question_timers: dict[int, asyncio.Task] = {}
@@ -76,9 +76,10 @@ async def start_lobby(bot: Bot, test: dict, chat_id: int,
         f"🎲 <b>Приготовьтесь пройти тест «{title}»</b>\n\n"
         f"Автор: {escape_html(author)}\n"
         f"🖊 {qcount} вопросов\n"
-        f"⏱ {time_per_q} секунд на вопрос\n"
-        f"📄 Ответы видны участникам группы и автору теста\n\n"
-        f"🏁 Вопросы появятся, когда хотя бы {MIN_PLAYERS} человека будут готовы отвечать. "
+        f"⏱ {time_per_q} секунд на вопрос\n\n"
+        f"🏁 Вопросы появятся, когда хотя бы {MIN_PLAYERS} человека нажмут «Пройти тест».\n"
+        f"💡 <b>Важно:</b> отвечать может каждый! Даже если не нажал «Пройти тест» — "
+        f"твои ответы засчитаются, и ты попадёшь в топ-20.\n\n"
         f"Чтобы остановить тест, отправьте /stop\n\n"
         f"👥 <b>Готовы: 0/{MIN_PLAYERS}</b>"
     )
@@ -260,13 +261,12 @@ async def _refresh_lobby_card(bot: Bot, gq_id: int) -> None:
 
 
 async def _lobby_timeout(bot: Bot, gq_id: int):
-    """Если за 5 мин не набралось игроков — отмена."""
+    """Если за 10 мин не набралось игроков — отмена + открыть чат."""
     try:
         await asyncio.sleep(LOBBY_TIMEOUT_SECONDS)
         gq = db.fetchone("SELECT * FROM group_quizzes WHERE id=?", (gq_id,))
         if not gq or gq['status'] != 'lobby':
             return
-        # Авто-отмена
         db.execute("UPDATE group_quizzes SET status='cancelled', finished_at=? WHERE id=?",
                     (now_iso(), gq_id))
         try:
@@ -280,6 +280,13 @@ async def _lobby_timeout(bot: Bot, gq_id: int):
                 f"≥{MIN_PLAYERS} игроков.")
         except Exception:
             pass
+        # Открываем чат если был закрыт сериями + двигаем серию
+        try:
+            from services import autopub_service
+            await autopub_service.on_series_test_finished(
+                bot, gq['test_id'], gq['chat_id'])
+        except Exception as e:
+            logger.warning("cancel open chat: %s", e)
     except asyncio.CancelledError:
         pass
     finally:
@@ -417,6 +424,37 @@ async def _send_question(bot: Bot, gq_id: int):
         await _send_question(bot, gq_id)
         return
 
+    # Фото вопроса (если есть) — перед Quiz Poll
+    _gphoto = question.get('photo_file_id') or question.get('image_file_id')
+    if _gphoto:
+        try:
+            await bot.send_photo(chat_id=gq['chat_id'], photo=_gphoto)
+        except Exception:
+            pass
+    else:
+        # Авто-рендер математики
+        try:
+            from services import formula_service as _fs
+            qtext = question.get('text') or ''
+            if _fs.has_math(qtext):
+                cached = _fs.get_cached_file_id(qtext)
+                if cached:
+                    await bot.send_photo(chat_id=gq['chat_id'], photo=cached)
+                else:
+                    import time as _t
+                    out = f"/tmp/gq_math_{_t.time_ns()}.png"
+                    if _fs.render_question_image(qtext, out):
+                        from aiogram.types import FSInputFile
+                        m = await bot.send_photo(chat_id=gq['chat_id'],
+                                                  photo=FSInputFile(out))
+                        if m.photo:
+                            _fs.set_cached_file_id(qtext, m.photo[-1].file_id)
+                        import os as _os
+                        try: _os.remove(out)
+                        except Exception: pass
+        except Exception as e:
+            logger.warning("group math render: %s", e)
+
     try:
         msg = await bot.send_poll(
             chat_id=gq['chat_id'],
@@ -485,6 +523,8 @@ async def on_poll_answer(bot: Bot, poll_id: str, option_ids: list[int],
                           user) -> None:
     """
     Обработка poll_answer для групповых квизов.
+    Игрок засчитывается АВТОМАТИЧЕСКИ при первом ответе,
+    даже если не нажимал «Пройти тест».
     """
     gq_id = _poll_to_gq.get(poll_id)
     if not gq_id:
@@ -492,16 +532,32 @@ async def on_poll_answer(bot: Bot, poll_id: str, option_ids: list[int],
     gq = db.fetchone("SELECT * FROM group_quizzes WHERE id=?", (gq_id,))
     if not gq or gq['status'] != 'running':
         return
-    # Игрок зарегистрирован?
+    if not option_ids:
+        # Сняли голос — игнор
+        return
+
+    # Игрок зарегистрирован? Если нет — регистрируем на лету
     player = db.fetchone(
         "SELECT * FROM group_quiz_players WHERE group_quiz_id=? AND tg_id=?",
         (gq_id, user.id))
     if not player:
-        return  # не нажал «Пройти тест» — ответ не засчитывается
-
-    if not option_ids:
-        # Сняли голос — игнор
-        return
+        # Авто-регистрация на лету с правильными полями
+        fname = getattr(user, 'first_name', None) or ''
+        lname = getattr(user, 'last_name', None) or ''
+        full_name = " ".join(filter(None, [fname, lname])) or "Игрок"
+        uname = getattr(user, 'username', None) or ""
+        try:
+            db.execute(
+                "INSERT INTO group_quiz_players "
+                "(group_quiz_id, tg_id, username, full_name) VALUES (?,?,?,?)",
+                (gq_id, user.id, uname, full_name))
+        except Exception as e:
+            logger.warning("auto-register player: %s", e)
+        player = db.fetchone(
+            "SELECT * FROM group_quiz_players WHERE group_quiz_id=? AND tg_id=?",
+            (gq_id, user.id))
+        if not player:
+            return
 
     chosen = option_ids[0]
     correct_idx = gq['current_poll_correct_index']
@@ -576,6 +632,15 @@ async def _finalize(bot: Bot, gq_id: int, aborted: bool = False):
                                 disable_web_page_preview=True)
     except Exception as e:
         logger.warning("Не удалось отправить лидерборд: %s", e)
+
+    # Хук: уведомляем автопубликацию что тест из серии завершён —
+    # чтобы СРАЗУ запустить следующий тест серии или открыть чат.
+    try:
+        from services import autopub_service
+        await autopub_service.on_series_test_finished(bot, gq['test_id'],
+                                                       gq['chat_id'])
+    except Exception as e:
+        logger.warning("autopub hook: %s", e)
 
 
 def _build_leaderboard_text(title: str, qcount: int, players: list[dict],
@@ -799,3 +864,62 @@ def _build_pagination_buttons(test_id: int, page: int, total: int) -> list[Inlin
         buttons.append(InlineKeyboardButton(
             text="»", callback_data=f"stats:{test_id}:{total}"))
     return buttons
+
+
+# ===================== ПАУЗА / ПРОДОЛЖЕНИЕ =====================
+
+async def _can_control(bot: Bot, chat_id: int, gq: dict,
+                        requester_tg_id: int) -> bool:
+    """Может ли юзер управлять тестом (админ бота, автор или админ чата)."""
+    import utils as _utils
+    if requester_tg_id and _utils.is_admin(requester_tg_id):
+        return True
+    if gq and gq.get('started_by') == requester_tg_id:
+        return True
+    try:
+        member = await bot.get_chat_member(chat_id, requester_tg_id)
+        if member.status in ("creator", "administrator"):
+            return True
+    except Exception:
+        pass
+    return False
+
+
+async def pause_quiz(bot: Bot, chat_id: int, requester_tg_id: int = 0) -> tuple:
+    """
+    Поставить активный тест в группе на паузу.
+    Возвращает (ok, key). Останавливает таймер и текущий poll.
+    """
+    gq = db.fetchone(
+        "SELECT * FROM group_quizzes WHERE chat_id=? AND status='running'",
+        (chat_id,))
+    if not gq:
+        return False, "no_active"
+    if requester_tg_id and not await _can_control(bot, chat_id, gq, requester_tg_id):
+        return False, "no_rights"
+    t = _question_timers.pop(gq['id'], None)
+    if t and not t.done():
+        t.cancel()
+    try:
+        if gq.get('current_poll_message_id'):
+            await bot.stop_poll(chat_id, gq['current_poll_message_id'])
+    except Exception:
+        pass
+    db.execute("UPDATE group_quizzes SET status='paused' WHERE id=?", (gq['id'],))
+    return True, "ok"
+
+
+async def resume_quiz(bot: Bot, chat_id: int, requester_tg_id: int = 0) -> tuple:
+    """Продолжить тест с текущего вопроса."""
+    gq = db.fetchone(
+        "SELECT * FROM group_quizzes WHERE chat_id=? AND status='paused'",
+        (chat_id,))
+    if not gq:
+        return False, "no_paused"
+    if requester_tg_id and not await _can_control(bot, chat_id, gq, requester_tg_id):
+        return False, "no_rights"
+    db.execute("UPDATE group_quizzes SET status='running' WHERE id=?", (gq['id'],))
+    if gq.get('current_poll_id'):
+        _poll_to_gq.pop(gq['current_poll_id'], None)
+    await _send_question(bot, gq['id'])
+    return True, "ok"
