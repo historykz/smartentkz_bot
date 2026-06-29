@@ -59,6 +59,49 @@ def cancel_timer(attempt_id: int) -> None:
         task.cancel()
 
 
+async def _maybe_render_math(bot, chat_id: int, text: str) -> bool:
+    """
+    Если в тексте вопроса есть математика — отрисовать картинку и отправить.
+    Кэширует file_id чтобы не рендерить повторно. Возвращает True если отрисовал.
+    """
+    try:
+        from services import formula_service as _fs
+    except Exception:
+        return False
+    if not _fs.has_math(text):
+        return False
+    # Кэш
+    cached = _fs.get_cached_file_id(text)
+    if cached:
+        try:
+            await bot.send_photo(chat_id=chat_id, photo=cached,
+                                  protect_content=PROTECT_CONTENT)
+            return True
+        except Exception:
+            pass  # file_id протух — перерендерим
+    # Рендерим
+    import os as _os, time as _t
+    out = f"/tmp/q_math_{_t.time_ns()}.png"
+    if not _fs.render_question_image(text, out):
+        return False
+    try:
+        from aiogram.types import FSInputFile
+        msg = await bot.send_photo(chat_id=chat_id, photo=FSInputFile(out),
+                                    protect_content=PROTECT_CONTENT)
+        # Кэшируем новый file_id
+        if msg.photo:
+            _fs.set_cached_file_id(text, msg.photo[-1].file_id)
+        return True
+    except Exception as e:
+        log.warning("send math image: %s", e)
+        return False
+    finally:
+        try:
+            _os.remove(out)
+        except Exception:
+            pass
+
+
 def get_test(test_id: int) -> Optional[dict]:
     row = db.fetchone("SELECT * FROM tests WHERE id=?", (test_id,))
     return dict(row) if row else None
@@ -102,6 +145,18 @@ def create_attempt(user_id: int, test_id: int, language: str,
                    group_id: Optional[int] = None,
                    started_by_user_id: Optional[int] = None) -> Optional[int]:
     """Создаёт попытку прохождения теста. Возвращает attempt_id или None."""
+    # Проверка бана за ложные апелляции (только для личных тестов)
+    if group_id is None:
+        try:
+            from services import appeal_service
+            banned, until = appeal_service.is_user_banned(user_id)
+            if banned:
+                log.info("user %s banned until %s — block test start",
+                         user_id, until)
+                return None
+        except Exception:
+            pass
+
     test = get_test(test_id)
     if not test:
         return None
@@ -151,6 +206,49 @@ def create_attempt(user_id: int, test_id: int, language: str,
             started_by_user_id,
         ),
     )
+    row = db.fetchone("SELECT last_insert_rowid() AS id")
+    return row["id"] if row else None
+
+
+def create_redo_attempt(prev_attempt_id: int) -> Optional[int]:
+    """
+    Создать попытку ТОЛЬКО из вопросов где юзер ошибся в prev_attempt_id.
+    Не засчитывается в статистику (is_counted=0).
+    """
+    prev = get_attempt(prev_attempt_id)
+    if not prev:
+        return None
+    # Ошибочные вопросы (неправильные, не пропущенные)
+    wrong_rows = db.fetchall(
+        "SELECT DISTINCT question_id FROM attempt_answers "
+        "WHERE attempt_id=? AND is_correct=0 AND COALESCE(skipped,0)=0",
+        (prev_attempt_id,))
+    qids = [r['question_id'] for r in wrong_rows]
+    if not qids:
+        return None
+    test = get_test(prev['test_id'])
+    if not test:
+        return None
+    random.shuffle(qids)
+    # Перемешать варианты
+    options_order = {}
+    if test["shuffle_options"]:
+        for qid in qids:
+            opts = get_question_options(qid)
+            ids = [o["id"] for o in opts]
+            random.shuffle(ids)
+            options_order[str(qid)] = ids
+    db.execute(
+        """INSERT INTO test_attempts
+        (user_id, test_id, current_question_index, question_order, options_order,
+         start_time, status, language, attempt_num, is_first_attempt, is_counted,
+         group_id, started_by_user_id)
+        VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+        (prev['user_id'], prev['test_id'], 0,
+          json.dumps(qids), json.dumps(options_order),
+          now_iso(), "in_progress", prev['language'] or 'ru',
+          999, 0, 0,  # attempt_num=999, не первая, НЕ засчитывается
+          None, prev['user_id']))
     row = db.fetchone("SELECT last_insert_rowid() AS id")
     return row["id"] if row else None
 
@@ -232,16 +330,43 @@ async def send_current_question(bot: Bot, attempt_id: int, chat_id: int) -> None
             # Шлём заголовок С КНОПКОЙ СТОП
             await bot.send_message(chat_id=chat_id, text=prefix,
                                     parse_mode="HTML", reply_markup=stop_kb)
-            # Картинка, если есть
-            if q.get("image_file_id"):
-                try:
-                    await bot.send_photo(
-                        chat_id=chat_id,
-                        photo=q["image_file_id"],
-                        protect_content=PROTECT_CONTENT,
-                    )
-                except Exception:
-                    pass
+            # Картинка: прикреплённая (с водяным знаком) ИЛИ авто-рендер
+            _photo = q.get("photo_file_id") or q.get("image_file_id")
+            _protected = bool(test.get('is_private') or test.get('is_paid'))
+            if _photo:
+                _pm = None
+                if _protected:
+                    try:
+                        from services import watermark_service as _wm
+                        u_w = db.fetchone(
+                            "SELECT tg_id, username FROM users WHERE id=?",
+                            (attempt['user_id'],))
+                        _pm = await _wm.send_watermarked_photo(
+                            bot, chat_id, _photo,
+                            (u_w.get('username') if u_w else '') or '',
+                            (u_w.get('tg_id') if u_w else 0) or 0,
+                            protect=PROTECT_CONTENT)
+                    except Exception:
+                        _pm = None
+                if _pm is None:
+                    try:
+                        _pm = await bot.send_photo(
+                            chat_id=chat_id,
+                            photo=_photo,
+                            protect_content=PROTECT_CONTENT,
+                        )
+                    except Exception:
+                        _pm = None
+                if _pm is not None and _protected:
+                    try:
+                        _private_poll_msgs.setdefault(attempt_id, []).append(
+                            (chat_id, _pm.message_id))
+                    except Exception:
+                        pass
+            else:
+                # Авто-рендер математики если есть формулы
+                _auto = await _maybe_render_math(bot, chat_id, q.get("text") or "")
+                # (если отрисовали — картинка уже отправлена)
             # Находим индекс правильного варианта в текущем порядке
             correct_idx = 0
             for i, o in enumerate(options):
@@ -271,19 +396,38 @@ async def send_current_question(bot: Bot, attempt_id: int, chat_id: int) -> None
                 "sent_at": time.time(),
             }
             msg = poll_msg
+            # Кнопки «Приостановить» и «Апелляция» — только в личке
+            try:
+                from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
+                pause_kb = InlineKeyboardMarkup(inline_keyboard=[[
+                    InlineKeyboardButton(text="⏸ Приостановить",
+                                         callback_data=f"tpz:{attempt_id}"),
+                    InlineKeyboardButton(text="⚠️ Апелляция",
+                                         callback_data=f"tap:{attempt_id}:{qid}"),
+                ]])
+                await bot.send_message(
+                    chat_id=chat_id,
+                    text="↑ Управление вопросом:",
+                    reply_markup=pause_kb,
+                )
+            except Exception:
+                pass
         else:
             # Fallback на inline-кнопки
             text = build_question_text(idx + 1, len(qids), q["text"], time_per_q, lang)
-            if q.get("image_file_id"):
+            _photo2 = q.get("photo_file_id") or q.get("image_file_id")
+            if _photo2:
                 msg = await bot.send_photo(
                     chat_id=chat_id,
-                    photo=q["image_file_id"],
+                    photo=_photo2,
                     caption=text,
                     reply_markup=options_kb(attempt_id, qid, options),
                     parse_mode="HTML",
                     protect_content=PROTECT_CONTENT,
                 )
             else:
+                # Авто-рендер математики (картинка перед кнопками)
+                await _maybe_render_math(bot, chat_id, q.get("text") or "")
                 msg = await bot.send_message(
                     chat_id=chat_id,
                     text=text,
@@ -328,6 +472,10 @@ async def _question_timeout(bot: Bot, attempt_id: int, question_id: int,
         (attempt_id, question_id),
     )
     if answered:
+        return
+    # ДВОЙНАЯ проверка статуса прямо перед действиями (защита от гонки с паузой)
+    re_check = get_attempt(attempt_id)
+    if not re_check or re_check["status"] != "in_progress":
         return
     # Засчитываем пропуск
     db.execute(
@@ -451,8 +599,8 @@ async def process_poll_answer(bot: Bot, poll_id: str, option_ids: list[int],
     # ── Защита приватных тестов: запоминаем msg_id для удаления после теста ──
     try:
         test = db.fetchone(
-            "SELECT is_private FROM tests WHERE id=?", (attempt['test_id'],))
-        if test and test.get('is_private'):
+            "SELECT is_private, is_paid FROM tests WHERE id=?", (attempt['test_id'],))
+        if test and (test.get('is_private') or test.get('is_paid')):
             # Сохраняем msg_id для последующего удаления
             attempt_id = info["attempt_id"]
             _private_poll_msgs.setdefault(attempt_id, []).append(
@@ -602,11 +750,61 @@ async def finalize_attempt(bot: Bot, attempt_id: int, chat_id: int,
     )
     result_text += f"\n\n<b>{t('weak_topics_label', lang)}:</b>\n{weak_text}"
 
+    # Шапка: кто прошёл (@username + id) и сколько повторов
+    u_row = db.fetchone("SELECT tg_id, username FROM users WHERE id=?",
+                         (attempt['user_id'],))
+    redos_used = db.fetchone(
+        "SELECT COUNT(*) AS c FROM test_attempts "
+        "WHERE user_id=? AND test_id=? AND attempt_num=999",
+        (attempt['user_id'], attempt['test_id']))
+    n_redos = (redos_used['c'] if redos_used else 0) or 0
+    if u_row and u_row.get('tg_id'):
+        who = (f"@{u_row['username']}" if u_row.get('username') else "")
+        result_text = (f"👤 {who} (id:{u_row['tg_id']})\n" + result_text
+                       if who else
+                       f"👤 id:{u_row['tg_id']}\n" + result_text)
+    result_text += f"\n🔁 Повторов использовано: {n_redos}"
+
+    # Кнопки в результате
+    from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
+    rows = []
+    # Сколько ошибок было
+    wrong_count = db.fetchone(
+        "SELECT COUNT(*) AS c FROM attempt_answers "
+        "WHERE attempt_id=? AND is_correct=0 AND COALESCE(skipped,0)=0",
+        (attempt_id,))
+    n_wrong = (wrong_count['c'] if wrong_count else 0) or 0
+    if not aborted and n_wrong > 0:
+        if n_redos == 0:
+            rows.append([InlineKeyboardButton(
+                text=f"🔁 Повторить ошибки ({n_wrong}) — бесплатно",
+                callback_data=f"redoerr:{attempt_id}")])
+        else:
+            from services import payment_service as _pms
+            rows.append([InlineKeyboardButton(
+                text=f"🔁 Повторить ошибки ({n_wrong}) — {_pms.REDO_PRICE_STARS} ⭐️",
+                callback_data=f"buyredo:{attempt_id}")])
+    # Поделиться (в т.ч. приватные — юзер сам решает делиться ли результатом)
+    if not aborted:
+        share_query = f"share_{test['id']}_{correct}_{total}"
+        rows.append([InlineKeyboardButton(
+            text="📤 Поделиться результатом",
+            switch_inline_query=share_query)])
+    # Каталог тестов
+    rows.append([InlineKeyboardButton(
+        text="📚 Каталог тестов", callback_data="m:tests")])
+    result_kb = InlineKeyboardMarkup(inline_keyboard=rows) if rows else None
+
     try:
         await bot.send_message(chat_id=chat_id, text=result_text, parse_mode="HTML",
+                               reply_markup=result_kb,
                                protect_content=PROTECT_CONTENT)
     except Exception:
-        pass
+        try:
+            await bot.send_message(chat_id=chat_id, text=result_text,
+                                     parse_mode="HTML")
+        except Exception:
+            pass
 
     # Опционально: показать правильные ответы и объяснения
     if test["show_correct"] or test["show_explanation"]:
@@ -621,7 +819,7 @@ async def finalize_attempt(bot: Bot, attempt_id: int, chat_id: int,
             logger.exception("update_streak error: %s", e)
 
     # ── Защита приватных тестов: удаляем все Quiz Poll через 5 минут после теста ──
-    if test.get('is_private'):
+    if test.get('is_private') or test.get('is_paid'):
         msgs_to_del = _private_poll_msgs.pop(attempt_id, [])
         if msgs_to_del:
             async def _delete_after_delay():
@@ -635,6 +833,26 @@ async def finalize_attempt(bot: Bot, attempt_id: int, chat_id: int,
                 except Exception:
                     pass
             asyncio.create_task(_delete_after_delay())
+
+    # Если идёт анонс тестирования в чате — предложить перейти (после личного теста)
+    if not aborted and not attempt.get("group_id"):
+        try:
+            from services import autopub_service as _aps
+            ann = _aps.get_bot_announce()
+            if ann and ann.get('invite'):
+                from aiogram.types import (InlineKeyboardMarkup,
+                                            InlineKeyboardButton)
+                kb = InlineKeyboardMarkup(inline_keyboard=[[
+                    InlineKeyboardButton(
+                        text="🚀 Перейти к тестированию",
+                        url=ann['invite'])
+                ]])
+                txt = ("📣 Сейчас идёт тестирование в чате!\n"
+                       "Присоединяйся 👇" if lang == "ru"
+                       else "📣 Қазір чатта тестілеу жүріп жатыр!\nҚосыл 👇")
+                await bot.send_message(chat_id, txt, reply_markup=kb)
+        except Exception as e:
+            logger.warning("post-test announce offer: %s", e)
 
 
 def compute_weak_topics(attempt_id: int) -> list[str]:
