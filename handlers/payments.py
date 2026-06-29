@@ -554,10 +554,24 @@ async def msg_price_stars(message: Message, state: FSMContext):
     test_id = data.get('price_test_id')
     tenge = data.get('price_tenge', 0)
     await state.clear()
+    # Если обе цены 0 — тест становится бесплатным
+    if tenge == 0 and stars == 0:
+        db.execute(
+            "UPDATE tests SET is_paid=0, price=0, price_stars=0 WHERE id=?",
+            (test_id,))
+        await message.answer(
+            "🆓 Обе цены = 0, поэтому тест стал <b>бесплатным</b>.",
+            parse_mode="HTML")
+        return
     db.execute(
         "UPDATE tests SET is_paid=1, price=?, price_stars=? WHERE id=?",
         (tenge, stars, test_id))
+    note = ""
+    if stars == 0:
+        note = ("\n\n⚠️ Звёзды = 0 — у учеников НЕ будет кнопки покупки "
+                "за звёзды, только оплата через менеджера. "
+                "Задай звёзды если хочешь продавать в боте.")
     await message.answer(
         f"✅ <b>Тест теперь платный!</b>\n\n"
-        f"💵 {tenge} ₸  ·  ⭐️ {stars} звёзд",
+        f"💵 {tenge} ₸  ·  ⭐️ {stars} звёзд{note}",
         parse_mode="HTML")
