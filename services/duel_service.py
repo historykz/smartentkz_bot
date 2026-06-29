@@ -442,4 +442,3 @@ def get_duels_stats(user_id: int) -> dict:
                         (user_id, user_id))['c']
     losses = total - wins
     return {'wins': wins, 'losses': losses, 'total': total}
-
