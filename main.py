@@ -23,7 +23,9 @@ import database
 from middlewares import UserContextMiddleware, AntiSpamMiddleware
 from handlers import (common, profile, user, quiz, duel,
                        homework, rating, inline, admin, group_quiz,
-                       private_access, categories)
+                       private_access, categories, question_editor, autopub,
+                       appeals, profile_subjects, moderation, daily, notes,
+                       backup, zip_import, payments, announce)
 
 
 def setup_logging() -> None:
@@ -169,16 +171,27 @@ async def main() -> None:
 
     # Routers — порядок важен (общие → специфичные)
     dp.include_router(common.router)
+    dp.include_router(payments.router)  # платежи Stars — рано
+    dp.include_router(announce.router)
+    dp.include_router(appeals.router)
+    dp.include_router(profile_subjects.router)
+    dp.include_router(moderation.router)  # команды бан/мут — до group_quiz catch-all
     dp.include_router(profile.router)
     dp.include_router(user.router)
     dp.include_router(quiz.router)
     dp.include_router(duel.router)
     dp.include_router(homework.router)
+    dp.include_router(daily.router)
+    dp.include_router(notes.router)
     dp.include_router(rating.router)
     dp.include_router(inline.router)
     dp.include_router(group_quiz.router)
     dp.include_router(private_access.router)
     dp.include_router(categories.router)
+    dp.include_router(question_editor.router)
+    dp.include_router(autopub.router)
+    dp.include_router(backup.router)
+    dp.include_router(zip_import.router)
     dp.include_router(admin.router)
 
     await set_default_commands(bot)
@@ -190,6 +203,10 @@ async def main() -> None:
     # Фоновая задача: истечение приватного доступа
     from handlers import private_access as _pa
     asyncio.create_task(_pa.expiry_check_loop(bot))
+
+    # Фоновая задача: авто-публикация тестов по расписанию
+    from services import autopub_service as _aps
+    _aps.start_worker(bot)
 
     log.info("Запуск polling...")
     try:
@@ -204,3 +221,4 @@ if __name__ == "__main__":
         asyncio.run(main())
     except (KeyboardInterrupt, SystemExit):
         logging.info("Прерывание пользователем.")
+
