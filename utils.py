@@ -91,15 +91,84 @@ def set_user_lang(tg_id: int, lang: str) -> None:
 
 # === Админ / блок ===
 def is_admin(tg_id: int) -> bool:
+    """Проверка админ-прав. С retry на случай гонки БД."""
+    if not tg_id:
+        return False
     if tg_id in ADMIN_IDS:
         return True
-    row = db.fetchone("SELECT 1 FROM admins WHERE tg_id=?", (tg_id,))
-    return bool(row)
+    # Retry до 3 раз
+    for attempt in range(3):
+        try:
+            row = db.fetchone("SELECT 1 FROM admins WHERE tg_id=?", (tg_id,))
+            return bool(row)
+        except Exception as e:
+            if attempt == 2:
+                import logging
+                logging.getLogger(__name__).warning(
+                    "is_admin DB check failed after 3 retries: %s", e)
+                return False
+            import time as _t
+            _t.sleep(0.05)
+    return False
 
 
 def is_blocked(tg_id: int) -> bool:
     row = db.fetchone("SELECT is_blocked FROM users WHERE tg_id=?", (tg_id,))
     return bool(row and row["is_blocked"])
+
+
+def get_profile_subjects(tg_id: int) -> list:
+    """Список профильных: category_id (int) и/или 'other' (str)."""
+    row = db.fetchone("SELECT profile_subjects FROM users WHERE tg_id=?", (tg_id,))
+    if not row or not row.get('profile_subjects'):
+        return []
+    out = []
+    for x in str(row['profile_subjects']).split(','):
+        x = x.strip()
+        if x == 'other':
+            out.append('other')
+        elif x.isdigit():
+            out.append(int(x))
+    return out
+
+
+def has_other_subject(tg_id: int) -> bool:
+    """Выбрал ли юзер 'Другое' (показывать все тесты)."""
+    return 'other' in get_profile_subjects(tg_id)
+
+
+def set_profile_subjects(tg_id: int, items: list) -> None:
+    """Сохранить профильные (category_id или 'other')."""
+    parts = []
+    for x in items:
+        if x == 'other':
+            parts.append('other')
+        else:
+            try:
+                parts.append(str(int(x)))
+            except (ValueError, TypeError):
+                pass
+    csv = ",".join(parts)
+    db.execute("UPDATE users SET profile_subjects=? WHERE tg_id=?",
+                (csv, tg_id))
+
+
+def has_profile_subjects(tg_id: int) -> bool:
+    return len(get_profile_subjects(tg_id)) > 0
+
+
+def is_anonymous_chat_admin(message) -> bool:
+    """
+    Сообщение отправлено от имени чата (анонимный админ)?
+    Telegram ставит sender_chat == chat для анонимных админов.
+    """
+    try:
+        sc = getattr(message, 'sender_chat', None)
+        if sc and message.chat and sc.id == message.chat.id:
+            return True
+    except Exception:
+        pass
+    return False
 
 
 def set_blocked(user_id: int, blocked: bool) -> None:
@@ -161,6 +230,18 @@ def has_paid_access(user_id: int, test_id: Optional[int] = None,
             "SELECT 1 FROM paid_access WHERE user_id=? AND test_id=?",
             (user_id, test_id),
         )
+        if row:
+            return True
+        # Покупка за звёзды (по tg_id)
+        try:
+            u = db.fetchone("SELECT tg_id FROM users WHERE id=?", (user_id,))
+            if u and u.get('tg_id'):
+                from services import payment_service as _ps
+                if _ps.has_paid_access(test_id, u['tg_id']):
+                    return True
+        except Exception:
+            pass
+        return False
     elif note_id:
         row = db.fetchone(
             "SELECT 1 FROM paid_access WHERE user_id=? AND note_id=?",
@@ -336,3 +417,29 @@ def build_question_text(qnum: int, total: int, question_text: str,
     progress = t("question_progress", lang, n=qnum, total=total)
     time_label = t("time_left", lang, sec=time_sec)
     return f"<b>{progress}</b>\n⏱ {time_sec} сек\n\n{escape_html(question_text)}"
+
+
+# === Безопасное обновление сообщений ===
+async def safe_edit_or_send(call, text, reply_markup=None, parse_mode="HTML"):
+    """
+    Безопасное обновление callback-сообщения.
+    Если edit_text падает (старое сообщение, удалено, нет изменений) —
+    отправляет новое и снимает «загрузку».
+    """
+    try:
+        await call.message.edit_text(
+            text, reply_markup=reply_markup,
+            parse_mode=parse_mode, disable_web_page_preview=True)
+    except Exception:
+        try:
+            await call.message.answer(
+                text, reply_markup=reply_markup,
+                parse_mode=parse_mode, disable_web_page_preview=True)
+        except Exception as e:
+            import logging
+            logging.getLogger(__name__).warning("safe_edit_or_send failed: %s", e)
+    # Всегда закрываем «загрузку»
+    try:
+        await call.answer()
+    except Exception:
+        pass
