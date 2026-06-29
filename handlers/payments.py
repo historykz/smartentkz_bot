@@ -104,20 +104,16 @@ async def cb_buy_gift(call: CallbackQuery, state: FSMContext):
         await call.answer("Тест недоступен.", show_alert=True)
         return
     await call.answer()
-    kb = InlineKeyboardBuilder()
-    kb.button(text="🔗 Подарить по ссылке", callback_data=f"gift:link:{test_id}")
-    kb.button(text="👤 По @username", callback_data=f"gift:user:{test_id}")
-    kb.button(text="❌ Отмена", callback_data="gift:cancel")
-    kb.adjust(1)
+    # Сразу просим @username друга (без выбора способа)
+    await state.set_state(GiftStates.waiting_username)
+    await state.update_data(gift_test_id=test_id)
     await call.message.answer(
         f"🎁 <b>Подарить тест «{utils.escape_html(test['title'])}»</b>\n"
         f"Цена: {test['price_stars']} ⭐️\n\n"
-        "Как подарить?\n"
-        "• <b>По ссылке</b> — оплатишь, получишь сообщение для пересылки. "
-        "Первый кто нажмёт — получит тест.\n"
-        "• <b>По @username</b> — введёшь ник друга, оплатишь, "
-        "ему сразу придёт доступ.",
-        reply_markup=kb.as_markup(), parse_mode="HTML")
+        "👤 Введи <b>@username</b> друга, которому хочешь подарить.\n"
+        "<i>Друг должен был хотя бы раз запускать этого бота.</i>\n\n"
+        "/cancel — отмена",
+        parse_mode="HTML")
 
 
 @router.callback_query(F.data == "gift:cancel")
@@ -127,39 +123,6 @@ async def cb_gift_cancel(call: CallbackQuery, state: FSMContext):
         await call.message.edit_text("❌ Отменено.")
     except Exception:
         pass
-    await call.answer()
-
-
-@router.callback_query(F.data.startswith("gift:link:"))
-async def cb_gift_link(call: CallbackQuery, bot: Bot):
-    test_id = int(call.data.split(":")[2])
-    test = db.fetchone("SELECT * FROM tests WHERE id=?", (test_id,))
-    if not test:
-        await call.answer()
-        return
-    await call.answer()
-    stars = test['price_stars']
-    try:
-        await bot.send_invoice(
-            chat_id=call.message.chat.id,
-            title=f"🎁 Подарок: {test['title']}"[:32],
-            description="После оплаты получишь ссылку-подарок для друга",
-            payload=_payload(k="giftlink", t=test_id),
-            currency="XTR",
-            prices=[LabeledPrice(label="Подарок другу", amount=stars)],
-        )
-    except Exception as e:
-        await call.message.answer(f"⚠️ Не смог создать счёт: {e}")
-
-
-@router.callback_query(F.data.startswith("gift:user:"))
-async def cb_gift_user_ask(call: CallbackQuery, state: FSMContext):
-    test_id = int(call.data.split(":")[2])
-    await state.set_state(GiftStates.waiting_username)
-    await state.update_data(gift_test_id=test_id)
-    await call.message.answer(
-        "👤 Введи @username друга (он должен был хоть раз запускать бота):\n\n"
-        "/cancel — отмена")
     await call.answer()
 
 
@@ -415,13 +378,97 @@ async def cb_my_purchases(call: CallbackQuery):
 
 # ===================== ВОЗВРАТ (только админ) =====================
 
+@router.message(Command("refunds"), IsAdmin())
+async def cmd_refunds_list(message: Message):
+    """Список последних покупок с кнопками возврата (удобно, без кода)."""
+    rows = db.fetchall(
+        """SELECT p.*, t.title AS test_title, u.username AS buyer_name
+           FROM purchases p
+           LEFT JOIN tests t ON t.id = p.test_id
+           LEFT JOIN users u ON u.tg_id = p.user_tg_id
+           WHERE p.charge_id IS NOT NULL AND p.charge_id != ''
+           ORDER BY p.id DESC LIMIT 20""")
+    if not rows:
+        await message.answer("Покупок для возврата пока нет.")
+        return
+    from aiogram.utils.keyboard import InlineKeyboardBuilder
+    kb = InlineKeyboardBuilder()
+    lines = ["↩️ <b>Возврат звёзд</b>\nВыбери покупку для возврата:\n"]
+    for p in rows:
+        who = f"@{p['buyer_name']}" if p.get('buyer_name') else f"id{p['user_tg_id']}"
+        kind_emoji = {'test':'💎','category':'📂','gift':'🎁','redo':'🔁'}.get(p['kind'],'•')
+        what = p.get('test_title') or p['kind']
+        label = f"{kind_emoji} {who} · {what[:20]} · {p['stars_amount']}⭐️"
+        kb.button(text=label[:60], callback_data=f"dorefund:{p['id']}")
+    kb.button(text="❌ Закрыть", callback_data="refund:close")
+    kb.adjust(1)
+    await message.answer("\n".join(lines), reply_markup=kb.as_markup(),
+                          parse_mode="HTML")
+
+
+@router.callback_query(F.data == "refund:close", IsAdmin())
+async def cb_refund_close(call: CallbackQuery):
+    try:
+        await call.message.delete()
+    except Exception:
+        pass
+    await call.answer()
+
+
+@router.callback_query(F.data.startswith("dorefund:"), IsAdmin())
+async def cb_do_refund(call: CallbackQuery, bot: Bot):
+    """Возврат по кнопке (с подтверждением)."""
+    pid = int(call.data.split(":")[1])
+    p = db.fetchone("SELECT * FROM purchases WHERE id=?", (pid,))
+    if not p:
+        await call.answer("Покупка не найдена.", show_alert=True)
+        return
+    # Подтверждение
+    from aiogram.utils.keyboard import InlineKeyboardBuilder
+    kb = InlineKeyboardBuilder()
+    kb.button(text=f"✅ Да, вернуть {p['stars_amount']} ⭐️",
+              callback_data=f"refundyes:{pid}")
+    kb.button(text="❌ Отмена", callback_data="refund:close")
+    kb.adjust(1)
+    await call.message.answer(
+        f"↩️ Вернуть <b>{p['stars_amount']} ⭐️</b> пользователю?\n"
+        f"Доступ к тесту будет отозван.",
+        reply_markup=kb.as_markup(), parse_mode="HTML")
+    await call.answer()
+
+
+@router.callback_query(F.data.startswith("refundyes:"), IsAdmin())
+async def cb_refund_confirm(call: CallbackQuery, bot: Bot):
+    pid = int(call.data.split(":")[1])
+    p = db.fetchone("SELECT * FROM purchases WHERE id=?", (pid,))
+    if not p:
+        await call.answer("Уже возвращено или не найдено.", show_alert=True)
+        return
+    try:
+        await bot.refund_star_payment(
+            user_id=p['user_tg_id'],
+            telegram_payment_charge_id=p['charge_id'])
+    except Exception as e:
+        await call.answer(f"Telegram отклонил: {e}", show_alert=True)
+        return
+    db.execute("DELETE FROM purchases WHERE id=?", (p['id'],))
+    try:
+        await call.message.edit_text(
+            f"✅ Возврат {p['stars_amount']} ⭐️ выполнен, доступ отозван.")
+    except Exception:
+        pass
+    await call.answer("✅ Возвращено", show_alert=True)
+
+
 @router.message(Command("refund"), IsAdmin())
 async def cmd_refund(message: Message, bot: Bot):
     parts = (message.text or '').split()
     if len(parts) < 2:
         await message.answer(
-            "Использование: <code>/refund charge_id</code>\n"
-            "charge_id смотри в покупках (адм. статистика) или логах.",
+            "↩️ <b>Возврат звёзд</b>\n\n"
+            "Проще всего: напиши <code>/refunds</code> — покажу список "
+            "покупок с кнопками возврата (без ввода кода).\n\n"
+            "Или вручную: <code>/refund код_платежа</code>",
             parse_mode="HTML")
         return
     charge = parts[1].strip()
