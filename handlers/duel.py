@@ -22,13 +22,57 @@ async def cb_duel_menu(call: CallbackQuery, user: dict):
         await call.answer(t("personal_chat_only", lang), show_alert=True)
         return
     try:
-        await call.message.edit_text(t("duel_menu", lang), reply_markup=duel_menu_kb(lang))
+        await call.message.edit_text(t("duel_menu", lang),
+                                       reply_markup=duel_menu_kb(lang),
+                                       parse_mode="HTML")
     except Exception:
-        await call.message.answer(t("duel_menu", lang), reply_markup=duel_menu_kb(lang))
+        await call.message.answer(t("duel_menu", lang),
+                                    reply_markup=duel_menu_kb(lang),
+                                    parse_mode="HTML")
     await call.answer()
 
 
-@router.callback_query(F.data == "duel:fast")
+@router.callback_query(F.data == "duel:invite")
+async def cb_duel_invite(call: CallbackQuery, user: dict):
+    lang = user.get('language') or 'ru'
+    if call.message.chat.type != "private":
+        await call.answer(t("personal_chat_only", lang), show_alert=True)
+        return
+    await call.answer()
+    code = await duel_service.create_invite(
+        call.from_user.id, call.message.chat.id, lang)
+    # username бота
+    import config
+    bot_un = getattr(config, 'BOT_USERNAME', '') or ''
+    if not bot_un:
+        try:
+            bot_un = (await call.bot.get_me()).username
+        except Exception:
+            bot_un = ''
+    link = f"https://t.me/{bot_un}?start=duel_{code}"
+
+    from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
+    # Сообщение которое юзер перешлёт в чат
+    invite_text = (
+        "⚔️ Я приглашаю тебя на дуэль!\n"
+        "Заходи, если не струсил 😏"
+    )
+    kb = InlineKeyboardMarkup(inline_keyboard=[[
+        InlineKeyboardButton(text="⚔️ Принять участие", url=link)
+    ]])
+    # Отправляем готовое приглашение
+    await call.message.answer(
+        "🔗 <b>Готово! Перешли это сообщение другу или в чат:</b>",
+        parse_mode="HTML")
+    await call.message.answer(invite_text, reply_markup=kb)
+    await call.message.answer(
+        "⚠️ Дуэль на 2 человек. Первый кто нажмёт «Принять участие» — "
+        "сыграет с тобой. Жди соперника! ⏳" if lang == "ru"
+        else "⚠️ Дуэль 2 адамға. «Қатысу» басқан бірінші адам сенімен ойнайды. "
+             "Қарсыласты күт! ⏳")
+
+
+
 async def cb_duel_fast(call: CallbackQuery, state: FSMContext, user: dict):
     lang = user.get('language') or 'ru'
     # Проверим, не в активной ли он уже дуэли
