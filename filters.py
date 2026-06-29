@@ -13,3 +13,4 @@ class IsAdmin(BaseFilter):
         if event.from_user is None:
             return False
         return is_admin(event.from_user.id)
+
