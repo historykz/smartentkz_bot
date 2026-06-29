@@ -11,49 +11,16 @@
 import sqlite3
 import threading
 import logging
-import os
 from contextlib import contextmanager
 from typing import Any, Iterable, Optional
 
-from config import DB_PATH as _CONFIGURED_DB_PATH
+from config import DB_PATH
 
 logger = logging.getLogger(__name__)
 
 # Глобальное соединение с локом для безопасной работы из разных потоков/корутин
 _conn: Optional[sqlite3.Connection] = None
 _lock = threading.RLock()
-
-
-def _resolve_db_path() -> str:
-    """
-    Определить рабочий путь к БД.
-    1. Пробуем путь из конфига (напр. /data/bot.db для Railway Volume).
-    2. Если папки нет — пытаемся создать.
-    3. Если не получилось (нет прав / нет Volume) — падаем на локальный
-       ./ent_bot.db, чтобы бот хотя бы запустился.
-    """
-    path = _CONFIGURED_DB_PATH
-    folder = os.path.dirname(path)
-    if folder:
-        try:
-            os.makedirs(folder, exist_ok=True)
-            # Проверяем что можем писать в папку
-            testfile = os.path.join(folder, ".write_test")
-            with open(testfile, "w") as f:
-                f.write("ok")
-            os.remove(testfile)
-            return path
-        except Exception as e:
-            logger.error(
-                "Не могу использовать %s (%s). Падаю на локальный ./ent_bot.db. "
-                "ВНИМАНИЕ: данные не сохранятся при перезапуске! "
-                "Проверь Volume в Railway (mount path %s).",
-                path, e, folder or "/data")
-            return "ent_bot.db"
-    return path
-
-
-DB_PATH = _resolve_db_path()
 
 
 def get_conn() -> sqlite3.Connection:
@@ -65,7 +32,6 @@ def get_conn() -> sqlite3.Connection:
         _conn.execute("PRAGMA journal_mode=WAL;")
         _conn.execute("PRAGMA foreign_keys=ON;")
         _conn.execute("PRAGMA synchronous=NORMAL;")
-        logger.info("База данных открыта: %s", DB_PATH)
     return _conn
 
 
