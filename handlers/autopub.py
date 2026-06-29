@@ -421,18 +421,18 @@ async def _show_categories(msg_obj, state: FSMContext):
     from collections import defaultdict
     by_cat = defaultdict(list)
     tests = db.fetchall(
-        "SELECT id, title, category_id FROM tests "
-        "WHERE status='active' AND COALESCE(is_paid,0)=0 "
-        "AND COALESCE(is_private,0)=0")
+        "SELECT id, title, category_id, is_paid, is_private FROM tests "
+        "WHERE status='active'")
     for tst in tests:
         by_cat[tst.get('category_id')].append(tst)
 
     if not tests:
-        await msg_obj.answer("⚠️ Нет ни одного бесплатного теста.")
+        await msg_obj.answer("⚠️ Нет ни одного теста.")
         return
 
     text = (f"🚀 <b>Запуск серии тестов</b>\n\n"
             f"✅ Выбрано: <b>{len(selected)}</b>\n\n"
+            f"💎 платный · 🔐 приватный · 🆓 бесплатный\n"
             f"👇 Выбери раздел — внутри отметишь тесты галочками.")
 
     kb = InlineKeyboardBuilder()
@@ -470,9 +470,8 @@ async def cb_apub_category(call: CallbackQuery, state: FSMContext):
     selected = set(data.get('apub_selected') or [])
     if arg == "none":
         tests = db.fetchall(
-            "SELECT id, title FROM tests "
-            "WHERE status='active' AND COALESCE(is_paid,0)=0 "
-            "AND COALESCE(is_private,0)=0 AND category_id IS NULL "
+            "SELECT id, title, is_paid, is_private FROM tests "
+            "WHERE status='active' AND category_id IS NULL "
             "ORDER BY id DESC")
         cat_title = "📭 Без раздела"
     else:
@@ -483,9 +482,8 @@ async def cb_apub_category(call: CallbackQuery, state: FSMContext):
             return
         cat = db.fetchone("SELECT * FROM test_categories WHERE id=?", (cat_id,))
         tests = db.fetchall(
-            "SELECT id, title FROM tests "
-            "WHERE status='active' AND COALESCE(is_paid,0)=0 "
-            "AND COALESCE(is_private,0)=0 AND category_id=? "
+            "SELECT id, title, is_paid, is_private FROM tests "
+            "WHERE status='active' AND category_id=? "
             "ORDER BY id DESC", (cat_id,))
         cat_title = f"{cat.get('emoji') or '📚'} {cat['name']}"
 
@@ -500,7 +498,8 @@ async def cb_apub_category(call: CallbackQuery, state: FSMContext):
     kb = InlineKeyboardBuilder()
     for t in tests:
         mark = "✅" if t['id'] in selected else "▫️"
-        kb.button(text=f"{mark} {t['title'][:40]}",
+        tag = "💎" if t.get('is_paid') else ("🔐" if t.get('is_private') else "")
+        kb.button(text=f"{mark} {tag}{t['title'][:38]}",
                   callback_data=f"apubtog:{t['id']}:{arg}")
     if in_sel == len(tests):
         kb.button(text="◻️ Снять все в разделе",
@@ -549,8 +548,7 @@ async def cb_apub_all(call: CallbackQuery, state: FSMContext):
         return
     if arg == "none":
         tests = db.fetchall(
-            "SELECT id FROM tests WHERE status='active' AND COALESCE(is_paid,0)=0 "
-            "AND COALESCE(is_private,0)=0 AND category_id IS NULL")
+            "SELECT id FROM tests WHERE status='active' AND category_id IS NULL")
     else:
         try:
             cat_id = int(arg)
@@ -558,8 +556,7 @@ async def cb_apub_all(call: CallbackQuery, state: FSMContext):
             await call.answer()
             return
         tests = db.fetchall(
-            "SELECT id FROM tests WHERE status='active' AND COALESCE(is_paid,0)=0 "
-            "AND COALESCE(is_private,0)=0 AND category_id=?", (cat_id,))
+            "SELECT id FROM tests WHERE status='active' AND category_id=?", (cat_id,))
     data = await state.get_data()
     selected = set(data.get('apub_selected') or [])
     if action == "on":
@@ -1099,8 +1096,7 @@ async def _rnd_show_categories(msg_obj, state: FSMContext):
     by_cat = defaultdict(list)
     tests = db.fetchall(
         "SELECT id, title, category_id FROM tests "
-        "WHERE status='active' AND COALESCE(is_paid,0)=0 "
-        "AND COALESCE(is_private,0)=0 AND language=?", (lang,))
+        "WHERE status='active' AND language=?", (lang,))
     for t in tests:
         by_cat[t.get('category_id')].append(t)
 
@@ -1154,7 +1150,6 @@ async def cb_rnd_cat(call: CallbackQuery, state: FSMContext):
     if arg == "none":
         tests = db.fetchall(
             "SELECT id, title FROM tests WHERE status='active' "
-            "AND COALESCE(is_paid,0)=0 AND COALESCE(is_private,0)=0 "
             "AND language=? AND category_id IS NULL ORDER BY id DESC", (lang,))
         cat_title = "📭 Без раздела"
     else:
@@ -1162,7 +1157,6 @@ async def cb_rnd_cat(call: CallbackQuery, state: FSMContext):
         cat = db.fetchone("SELECT * FROM test_categories WHERE id=?", (cat_id,))
         tests = db.fetchall(
             "SELECT id, title FROM tests WHERE status='active' "
-            "AND COALESCE(is_paid,0)=0 AND COALESCE(is_private,0)=0 "
             "AND language=? AND category_id=? ORDER BY id DESC", (lang, cat_id))
         cat_title = f"{cat.get('emoji') or '📚'} {cat['name']}"
     if not tests:
@@ -1224,13 +1218,13 @@ async def cb_rnd_all(call: CallbackQuery, state: FSMContext):
     selected = set(data.get('rnd_selected') or [])
     if arg == "none":
         tests = db.fetchall(
-            "SELECT id FROM tests WHERE status='active' AND COALESCE(is_paid,0)=0 "
-            "AND COALESCE(is_private,0)=0 AND language=? AND category_id IS NULL",
+            "SELECT id FROM tests WHERE status='active' "
+            "AND language=? AND category_id IS NULL",
             (lang,))
     else:
         tests = db.fetchall(
-            "SELECT id FROM tests WHERE status='active' AND COALESCE(is_paid,0)=0 "
-            "AND COALESCE(is_private,0)=0 AND language=? AND category_id=?",
+            "SELECT id FROM tests WHERE status='active' "
+            "AND language=? AND category_id=?",
             (lang, int(arg)))
     if action == "on":
         for t in tests:
