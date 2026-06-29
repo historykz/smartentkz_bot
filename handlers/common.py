@@ -29,17 +29,86 @@ async def cmd_start_deep(message: Message, command: CommandObject, state: FSMCon
     arg = (command.args or "").strip()
     lang = _resolve_lang(user)
 
+    # === Дуэль по ссылке-приглашению (start=duel_<code>) ===
+    if arg.startswith("duel_") and message.chat.type == "private":
+        code = arg[5:]
+        from services import duel_service
+        status = await duel_service.join_invite(
+            message.bot, code, message.from_user.id, message.chat.id, lang)
+        if status == 'started':
+            # дуэль запустилась — сообщения шлёт сам сервис
+            return
+        elif status == 'already_full':
+            # Третий лишний — ведём в бота, предлагаем свою дуэль
+            import config as _cfg
+            bot_un = getattr(_cfg, 'BOT_USERNAME', '') or ''
+            if not bot_un:
+                try:
+                    bot_un = (await message.bot.get_me()).username
+                except Exception:
+                    bot_un = ''
+            new_code = await duel_service.create_invite(
+                message.from_user.id, message.chat.id, lang)
+            new_link = f"https://t.me/{bot_un}?start=duel_{new_code}"
+            from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
+            kb = InlineKeyboardMarkup(inline_keyboard=[[
+                InlineKeyboardButton(text="⚔️ Принять участие", url=new_link)
+            ]])
+            await message.answer(
+                "⚔️ Эта дуэль уже идёт (2 игрока).\n\n"
+                "Хочешь свою? Перешли друзьям эту ссылку 👇" if lang == "ru"
+                else "⚔️ Бұл дуэль басталып қойды (2 ойыншы).\n\n"
+                     "Өзіңдікі керек пе? Достарыңа мына сілтемені жібер 👇")
+            await message.answer(
+                "⚔️ Я приглашаю тебя на дуэль!\nЗаходи, если не струсил 😏",
+                reply_markup=kb)
+            return
+        elif status == 'host_waiting':
+            await message.answer(
+                "⏳ Ты создатель этой дуэли. Жди когда соперник "
+                "нажмёт «Принять участие»!" if lang == "ru"
+                else "⏳ Сен осы дуэльдің авторысың. Қарсыластың "
+                     "«Қатысу» басуын күт!")
+            return
+        else:  # not_found
+            await message.answer(
+                "⚠️ Эта дуэль не найдена или истекла. "
+                "Создай свою через «⚔️ Дуэль» в меню." if lang == "ru"
+                else "⚠️ Дуэль табылмады немесе мерзімі бітті. "
+                     "Мәзірден өзіңдікін жаса.")
+            return
+
+    # === Принять подарок (start=gift_<code>) ===
+    if arg.startswith("gift_") and message.chat.type == "private":
+        from handlers.payments import claim_gift
+        await claim_gift(message, arg[5:])
+        return
+
     # === Запуск теста в группе (через ?startgroup=launch_X) ===
     if arg.startswith("launch_") and message.chat.type in ("group", "supergroup"):
         try:
             test_id = int(arg[7:])
         except ValueError:
             return
-        # Проверяем что добавивший — админ
         import utils as _utils
-        if not _utils.is_admin(message.from_user.id):
+        # Разрешаем: админу бота, анонимному админу чата, или админу чата
+        allowed = False
+        if _utils.is_anonymous_chat_admin(message):
+            allowed = True
+        elif message.from_user and _utils.is_admin(message.from_user.id):
+            allowed = True
+        elif message.from_user:
             try:
-                await message.reply("⛔ Запустить тест может только администратор бота.")
+                member = await message.bot.get_chat_member(
+                    message.chat.id, message.from_user.id)
+                if member.status in ("administrator", "creator"):
+                    allowed = True
+            except Exception:
+                pass
+        if not allowed:
+            try:
+                await message.reply(
+                    "⛔ Запустить тест может только админ чата или бота.")
             except Exception:
                 pass
             return
@@ -54,13 +123,14 @@ async def cmd_start_deep(message: Message, command: CommandObject, state: FSMCon
                 pass
             return
         # Записываем группу
+        _added_by = message.from_user.id if message.from_user else 0
         _db.execute(
             """INSERT OR IGNORE INTO known_groups (chat_id, title, type, added_by, seen_at)
                VALUES (?,?,?,?, CURRENT_TIMESTAMP)""",
             (message.chat.id, message.chat.title or "",
-             message.chat.type, message.from_user.id))
+             message.chat.type, _added_by))
         ok, key, gq_id = await group_quiz_service.start_lobby(
-            message.bot, dict(test), message.chat.id, message.from_user.id)
+            message.bot, dict(test), message.chat.id, _added_by)
         if not ok:
             try:
                 if key == "already_running":
@@ -101,7 +171,7 @@ async def cmd_start_deep(message: Message, command: CommandObject, state: FSMCon
     await _apply_pending_and_show_menu(message, state, user)
 
 
-@router.message(CommandStart())
+@router.message(CommandStart(), F.chat.type == "private")
 async def cmd_start(message: Message, state: FSMContext, user: dict):
     await state.clear()
     lang = _resolve_lang(user)
@@ -116,22 +186,18 @@ async def cmd_start(message: Message, state: FSMContext, user: dict):
             pass
         return
 
-    # Если язык ещё не выбран — спрашиваем
-    if not user.get('language'):
-        await message.answer(
-            "🌐 <b>Выберите язык</b> · <b>Тілді таңдаңыз</b>",
-            reply_markup=language_kb(), parse_mode="HTML")
-        await state.set_state(CommonStates.choosing_language)
-        return
-
-    # Сразу главное меню
+    # ВСЕГДА спрашиваем язык в начале — так договаривались
     await message.answer(
-        t("main_menu", lang),
-        reply_markup=main_menu_kb(lang, utils.is_admin(message.from_user.id)),
-    )
+        "👋 <b>Привет! Сәлем!</b>\n\n"
+        "Я твой помощник по ЕНТ.\n"
+        "Сначала выбери язык — на нём бот будет с тобой общаться.\n\n"
+        "🌐 <b>Выберите язык</b> · <b>Тілді таңдаңыз</b>\n\n"
+        "👇 Тапни на нужный язык:",
+        reply_markup=language_kb(), parse_mode="HTML")
+    await state.set_state(CommonStates.choosing_language)
 
 
-@router.message(Command("restart"))
+@router.message(Command("restart"), F.chat.type == "private")
 async def cmd_restart(message: Message, state: FSMContext, user: dict):
     """Перезапуск — спрашиваем язык заново."""
     await state.clear()
@@ -245,9 +311,33 @@ async def cb_set_language(call: CallbackQuery, state: FSMContext, user: dict):
     await state.set_state(None)
     await state.clear()
 
+    # Объяснение про смену языка — на двух языках, чтобы юзер всегда понял
+    chosen_msg = (
+        ("✅ <b>Язык выбран: Русский</b>" if lang == "ru"
+         else "✅ <b>Тіл таңдалды: Қазақша</b>") +
+        "\n\n"
+        "🇷🇺 <b>Если захочешь сменить язык:</b>\n"
+        "«👤 Профиль» → «🌐 Сменить язык»\n\n"
+        "🇰🇿 <b>Тілді ауыстырғың келсе:</b>\n"
+        "«👤 Профиль» → «🌐 Тілді ауыстыру»")
+    try:
+        await call.message.answer(chosen_msg, parse_mode="HTML")
+    except Exception:
+        pass
+
+    # Если профильные предметы ещё не выбраны и есть профильные категории —
+    # показываем экран выбора. Иначе сразу меню.
+    from handlers import profile_subjects as _ps
+    has_subjects = utils.has_profile_subjects(call.from_user.id)
+    optional_cats = _ps.get_optional_categories()
+    if not has_subjects and optional_cats:
+        await _ps.show_subjects_screen(call, state, from_profile=False)
+        return
+
     await call.message.answer(
         t("main_menu", lang),
         reply_markup=main_menu_kb(lang, utils.is_admin(call.from_user.id)),
+        parse_mode="HTML",
     )
 
 
@@ -293,7 +383,7 @@ async def cb_main_menu(call: CallbackQuery, state: FSMContext, user: dict):
     await call.answer()
 
 
-@router.message(Command("menu"))
+@router.message(Command("menu"), F.chat.type == "private")
 async def cmd_menu(message: Message, state: FSMContext, user: dict):
     await state.clear()
     lang = _resolve_lang(user)
@@ -303,7 +393,7 @@ async def cmd_menu(message: Message, state: FSMContext, user: dict):
     )
 
 
-@router.message(Command("help"))
+@router.message(Command("help"), F.chat.type == "private")
 async def cmd_help(message: Message, user: dict):
     lang = _resolve_lang(user)
     await message.answer(t("help_text", lang), reply_markup=main_menu_kb(lang, utils.is_admin(message.from_user.id)))
@@ -312,12 +402,15 @@ async def cmd_help(message: Message, user: dict):
 @router.callback_query(F.data == "m:help")
 async def cb_help(call: CallbackQuery, user: dict):
     lang = _resolve_lang(user)
+    text = t("help_text", lang, manager=config.MANAGER_USERNAME)
     try:
-        await call.message.edit_text(t("help_text", lang),
-                                     reply_markup=main_menu_kb(lang, utils.is_admin(call.from_user.id)))
+        await call.message.edit_text(text, parse_mode="HTML",
+                                       reply_markup=main_menu_kb(lang, utils.is_admin(call.from_user.id)),
+                                       disable_web_page_preview=True)
     except Exception:
-        await call.message.answer(t("help_text", lang))
-    await call.answer()
+        await call.message.answer(text, parse_mode="HTML",
+                                    reply_markup=main_menu_kb(lang, utils.is_admin(call.from_user.id)),
+                                    disable_web_page_preview=True)
     await call.answer()
 
 
