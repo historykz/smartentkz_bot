@@ -75,3 +75,4 @@ def get_required_channel_for_note(note_id: int) -> Optional[str]:
     if row:
         return row["channel_username"]
     return None
+
