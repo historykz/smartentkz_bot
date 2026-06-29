@@ -30,17 +30,17 @@ _active_lock = asyncio.Lock()
 async def join_queue(bot: Bot, user_id: int, chat_id: int, lang: str) -> Optional[int]:
     """Поставить пользователя в очередь. Возвращает duel_id, если нашли пару, иначе None."""
     async with _queue_lock:
-        # Ищем подходящего противника
+        # Ищем противника с ТЕМ ЖЕ языком
         for i, w in enumerate(_queue):
             if w['user_id'] == user_id:
-                # уже в очереди
                 return None
-            # Подходит любой
+            if w.get('lang') != lang:
+                continue
             opponent = _queue.pop(i)
             duel_id = await _start_duel(bot, opponent['user_id'], opponent['chat_id'],
                                         opponent['lang'], user_id, chat_id, lang)
             return duel_id
-        # Никого нет — добавляем
+        # Никого нет с таким языком — добавляем
         _queue.append({
             'user_id': user_id,
             'chat_id': chat_id,
@@ -59,22 +59,96 @@ async def leave_queue(user_id: int) -> bool:
     return False
 
 
-def _pick_questions(count: int) -> list[int]:
-    """Случайные вопросы ТОЛЬКО из бесплатных НЕприватных активных тестов."""
+# ===================== ДУЭЛЬ ПО ССЫЛКЕ (приглашение) =====================
+# Комнаты: code -> {'host': uid, 'host_chat': chat, 'lang': str, 'created': ts, 'duel_id': None}
+_invite_rooms: dict[str, dict] = {}
+_invite_lock = asyncio.Lock()
+
+
+def _gen_code() -> str:
+    import secrets
+    return secrets.token_hex(4)  # 8 символов
+
+
+async def create_invite(user_tg_id: int, chat_id: int, lang: str) -> str:
+    """Создать комнату-приглашение. user_tg_id — telegram id. Возвращает код."""
+    # Конвертируем tg_id → внутренний id
+    u = utils.get_user_by_tg(user_tg_id)
+    internal_id = u['id'] if u else None
+    async with _invite_lock:
+        for code in list(_invite_rooms.keys()):
+            if _invite_rooms[code]['host_tg'] == user_tg_id and not _invite_rooms[code].get('duel_id'):
+                _invite_rooms.pop(code, None)
+        code = _gen_code()
+        _invite_rooms[code] = {
+            'host': internal_id,
+            'host_tg': user_tg_id,
+            'host_chat': chat_id,
+            'lang': lang,
+            'created': time.time(),
+            'duel_id': None,
+            'guest': None,
+        }
+    return code
+
+
+async def join_invite(bot: Bot, code: str, user_tg_id: int, chat_id: int,
+                       lang: str) -> str:
+    """
+    Присоединиться по коду. user_tg_id — telegram id.
+    Статусы: 'started' | 'already_full' | 'not_found' | 'host_waiting'
+    """
+    u = utils.get_user_by_tg(user_tg_id)
+    internal_id = u['id'] if u else None
+    async with _invite_lock:
+        room = _invite_rooms.get(code)
+        if not room:
+            return 'not_found'
+        if room['host_tg'] == user_tg_id and not room.get('guest'):
+            return 'host_waiting'
+        if room.get('duel_id') or room.get('guest'):
+            return 'already_full'
+        room['guest'] = internal_id
+        room['guest_tg'] = user_tg_id
+        host_id = room['host']
+        host_chat = room['host_chat']
+        host_lang = room['lang']
+        room['duel_id'] = 'starting'
+
+    if not host_id or not internal_id:
+        return 'not_found'
+
+    duel_id = await _start_duel(bot, host_id, host_chat, host_lang,
+                                 internal_id, chat_id, lang)
+    async with _invite_lock:
+        if code in _invite_rooms:
+            _invite_rooms[code]['duel_id'] = duel_id
+    return 'started'
+
+
+def cleanup_invite(code: str):
+    _invite_rooms.pop(code, None)
+
+
+
+def _pick_questions(count: int, lang: str = 'ru') -> list[int]:
+    """Случайные вопросы из бесплатных НЕприватных активных тестов на нужном языке."""
     rows = db.fetchall("""
         SELECT q.id FROM questions q
         JOIN tests t ON t.id = q.test_id
         WHERE t.status='active' AND t.is_paid=0
           AND COALESCE(t.is_private,0)=0
           AND t.allow_duel=1
-    """)
+          AND t.language=?
+    """, (lang,))
     if len(rows) < count:
         rows = db.fetchall("""
             SELECT q.id FROM questions q
             JOIN tests t ON t.id = q.test_id
             WHERE t.status='active' AND t.is_paid=0
               AND COALESCE(t.is_private,0)=0
-        """)
+              AND t.language=?
+        """, (lang,))
     qids = [r['id'] for r in rows]
     if len(qids) < count:
         return qids
@@ -83,7 +157,7 @@ def _pick_questions(count: int) -> list[int]:
 
 async def _start_duel(bot: Bot, uid1: int, chat1: int, lang1: str,
                       uid2: int, chat2: int, lang2: str) -> Optional[int]:
-    qids = _pick_questions(config.DUEL_QUESTIONS_COUNT)
+    qids = _pick_questions(config.DUEL_QUESTIONS_COUNT, lang1)
     if not qids:
         try:
             await bot.send_message(chat1, t("duel_no_questions", lang1))
@@ -368,3 +442,4 @@ def get_duels_stats(user_id: int) -> dict:
                         (user_id, user_id))['c']
     losses = total - wins
     return {'wins': wins, 'losses': losses, 'total': total}
+
