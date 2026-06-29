@@ -451,15 +451,26 @@ async def cb_make_paid(call: CallbackQuery, state: FSMContext):
         await call.answer()
         return
     if test.get('is_paid'):
+        stars = test.get('price_stars') or 0
+        tenge = test.get('price') or 0
         kb = InlineKeyboardBuilder()
-        kb.button(text="✏️ Изменить цены", callback_data=f"admprice:{test_id}")
+        warn = ""
+        if stars == 0:
+            warn = ("\n\n⚠️ <b>Звёзды не заданы!</b> Поэтому у учеников НЕТ "
+                    "кнопки покупки за звёзды. Задай цену в звёздах ниже 👇")
+            if tenge > 0:
+                kb.button(
+                    text=f"⚡️ Авто: {max(1, tenge // 2)} ⭐️ (тенге ÷ 2)",
+                    callback_data=f"admstarauto:{test_id}")
+        kb.button(text="✏️ Изменить цены (тенге + звёзды)",
+                  callback_data=f"admprice:{test_id}")
         kb.button(text="🆓 Сделать бесплатным", callback_data=f"admfree:{test_id}")
         kb.button(text="↩️ Назад", callback_data=f"admtest:{test_id}")
         kb.adjust(1)
         await call.message.answer(
-            f"💎 Тест платный\n"
-            f"💵 {test.get('price') or 0} ₸ · ⭐️ {test.get('price_stars') or 0} звёзд",
-            reply_markup=kb.as_markup())
+            f"💎 <b>Тест платный</b>\n"
+            f"💵 {tenge} ₸ · ⭐️ {stars} звёзд{warn}",
+            reply_markup=kb.as_markup(), parse_mode="HTML")
         await call.answer()
         return
     await state.set_state(PriceStates.waiting_tenge)
@@ -468,6 +479,23 @@ async def cb_make_paid(call: CallbackQuery, state: FSMContext):
         "💰 Введи цену в <b>ТЕНГЕ</b> (число):\n\n/cancel — отмена",
         parse_mode="HTML")
     await call.answer()
+
+
+@router.callback_query(F.data.startswith("admstarauto:"), IsAdmin())
+async def cb_star_auto(call: CallbackQuery):
+    """Быстро задать звёзды = тенге ÷ 2."""
+    test_id = int(call.data.split(":")[1])
+    test = db.fetchone("SELECT * FROM tests WHERE id=?", (test_id,))
+    if not test:
+        await call.answer()
+        return
+    tenge = test.get('price') or 0
+    stars = max(1, tenge // 2)
+    db.execute("UPDATE tests SET is_paid=1, price_stars=? WHERE id=?",
+                (stars, test_id))
+    await call.answer(
+        f"✅ Цена в звёздах: {stars} ⭐️\nТеперь у учеников есть кнопка покупки!",
+        show_alert=True)
 
 
 @router.callback_query(F.data.startswith("admprice:"), IsAdmin())
