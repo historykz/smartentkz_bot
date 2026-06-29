@@ -58,31 +58,79 @@ async def cb_tests_menu(call: CallbackQuery, user: dict):
     private_tests = _pa.list_user_private_tests(call.from_user.id)
     tests_no_cat = categories.get_tests_without_category(lang)
 
-    text = "📚 <b>Каталог тестов</b>" if lang != "kz" else "📚 <b>Тесттер каталогы</b>"
+    if lang == "kz":
+        text = ("📚 <b>Тесттер каталогы</b>\n\n"
+                "👇 Қажетті пәнді таңда — ішінде тесттер тізімі ашылады.\n"
+                "Содан кейін тестті бас → «▶️ Тестті өту»")
+    else:
+        text = ("📚 <b>Каталог тестов</b>\n\n"
+                "👇 Выбери предмет — внутри откроется список тестов.\n"
+                "Потом тапни на тест → «▶️ Пройти тест»")
 
     kb = InlineKeyboardBuilder()
 
     # Раздел приватных тестов — если есть
     if private_tests:
+        if lang == "kz":
+            text += f"\n\n🔐 Сенде <b>{len(private_tests)} жабық тест</b> бар!"
+        else:
+            text += f"\n\n🔐 У тебя есть <b>{len(private_tests)} закрытых теста</b>!"
         kb.button(text=f"🔐 Мои закрытые тесты ({len(private_tests)})",
                   callback_data="m:private_tests")
 
-    # Категории
-    for c in cats:
-        cnt = db.fetchone(
+    # Категории: обязательные (всем) + профильные юзера
+    profile_ids_raw = utils.get_profile_subjects(call.from_user.id)
+    has_other = 'other' in profile_ids_raw
+    profile_ids = set(x for x in profile_ids_raw if x != 'other')
+
+    def _cnt(cat_id):
+        return db.fetchone(
             """SELECT COUNT(*) AS c FROM tests
                WHERE category_id=? AND status='active'
                  AND COALESCE(is_private,0)=0 AND language=?""",
-            (c['id'], lang))['c']
-        if cnt > 0:
+            (cat_id, lang))['c']
+
+    required_cats = [c for c in cats if c.get('is_required')]
+    if has_other:
+        # «Другое» — показываем ВСЕ профильные разделы
+        profile_cats = [c for c in cats if not c.get('is_required')]
+    else:
+        profile_cats = [c for c in cats
+                        if not c.get('is_required') and c['id'] in profile_ids]
+
+    has_any = False
+    # Обязательные
+    shown_required = [(c, _cnt(c['id'])) for c in required_cats]
+    shown_required = [(c, n) for c, n in shown_required if n > 0]
+    if shown_required:
+        has_any = True
+        text += ("\n\n⭐️ <b>Міндетті:</b>" if lang == "kz"
+                 else "\n\n⭐️ <b>Обязательные:</b>")
+        for c, n in shown_required:
             emoji = c.get('emoji') or '📚'
-            kb.button(text=f"{emoji} {c['name']} ({cnt})",
+            kb.button(text=f"{emoji} {c['name']} ({n})",
                       callback_data=f"m:cat:{c['id']}")
 
-    # Тесты без раздела
-    if tests_no_cat:
-        kb.button(text=f"📭 Без раздела ({len(tests_no_cat)})",
-                  callback_data="m:cat:none")
+    # Профильные юзера
+    shown_profile = [(c, _cnt(c['id'])) for c in profile_cats]
+    shown_profile = [(c, n) for c, n in shown_profile if n > 0]
+    if shown_profile:
+        has_any = True
+        text += ("\n\n🎓 <b>Сенің бейіндік:</b>" if lang == "kz"
+                 else "\n\n🎓 <b>Твои профильные:</b>")
+        for c, n in shown_profile:
+            emoji = c.get('emoji') or '📚'
+            kb.button(text=f"{emoji} {c['name']} ({n})",
+                      callback_data=f"m:cat:{c['id']}")
+
+    # Если у юзера ещё не выбраны профильные — предложим выбрать
+    if not profile_ids:
+        optional_exist = any(not c.get('is_required') for c in cats)
+        if optional_exist:
+            kb.button(
+                text=("🎓 Бейіндік пәндерді таңда" if lang == "kz"
+                      else "🎓 Выбрать профильные предметы"),
+                callback_data="m:change_subjects")
 
     kb.button(text=t("btn_back", lang), callback_data="m:menu")
     kb.adjust(1)
@@ -96,7 +144,7 @@ async def cb_tests_menu(call: CallbackQuery, user: dict):
 
 @router.callback_query(F.data.startswith("m:cat:"))
 async def cb_tests_by_category(call: CallbackQuery, user: dict):
-    """Список тестов в выбранном разделе — простой список без текста."""
+    """Список тестов в выбранном разделе."""
     lang = _resolve_lang(user)
     from handlers import categories
     arg = call.data.split(":")[2]
@@ -118,7 +166,12 @@ async def cb_tests_by_category(call: CallbackQuery, user: dict):
         cat_title = f"{emoji} {cat['name']}"
 
     text = f"<b>{utils.escape_html(cat_title)}</b>"
-    if not tests:
+    if tests:
+        if lang == "kz":
+            text += "\n\n👇 Тестті тап → ашылады карточка → «▶️ Тестті өту»"
+        else:
+            text += "\n\n👇 Тапни на тест → откроется карточка → «▶️ Пройти тест»"
+    else:
         text += "\n\n<i>В этом разделе пока нет тестов.</i>"
 
     kb = InlineKeyboardBuilder()
@@ -213,16 +266,31 @@ async def show_test_card(bot: Bot, chat_id: int, user_tg_id: int, test_id: int, 
         if not _rs.user_can_unlock_paid_test(user['id']):
             qcount = db.fetchone(
                 "SELECT COUNT(*) AS c FROM questions WHERE test_id=?", (test['id'],))['c']
+            stars = test.get('price_stars') or 0
+            price_line = f"💵 {test['price']} ₸"
+            if stars:
+                price_line += f"  ·  ⭐️ {stars} звёзд"
             short_card = (
                 f"💰 <b>{utils.escape_html(test['title'])}</b>\n"
-                f"📚 {qcount} вопросов · ⏱ {test['time_per_question']} сек\n\n"
-                f"<i>Это платный тест.</i>"
+                f"📚 {qcount} вопросов · ⏱ {test['time_per_question']} сек\n"
+                f"{price_line}\n\n"
+                f"<i>Это платный тест. Выбери способ оплаты:</i>"
             )
             await bot.send_message(chat_id, short_card)
+            section_offer = None
+            try:
+                from services import payment_service as _pms
+                if test.get('category_id'):
+                    section_offer = _pms.get_section_offer(
+                        test['category_id'], user_tg_id)
+            except Exception:
+                pass
             await bot.send_message(
                 chat_id,
                 t("paid_test_card", lang, price=test['price'], manager=config.MANAGER_USERNAME),
-                reply_markup=paid_test_kb(test['id'], lang, config.MANAGER_USERNAME),
+                reply_markup=paid_test_kb(
+                    test['id'], lang, config.MANAGER_USERNAME,
+                    price_stars=stars, section_offer=section_offer),
             )
             return
 
@@ -232,6 +300,18 @@ async def show_test_card(bot: Bot, chat_id: int, user_tg_id: int, test_id: int, 
         dict(test), in_bot=True, viewer_is_admin=is_admin)
     await bot.send_message(chat_id, card_text, reply_markup=card_kb,
                             parse_mode="HTML", disable_web_page_preview=True)
+
+    # Короткая подсказка под карточкой — как пройти тест
+    if lang == "kz":
+        hint = ("👆 Тестті бастау үшін «<b>▶️ Тестті өту</b>» бас.\n"
+                "Бот сұрақтарды бір-бірлеп жібереді, әр сұраққа таймер болады.")
+    else:
+        hint = ("👆 Чтобы пройти тест — тапни «<b>▶️ Пройти тест</b>».\n"
+                "Бот будет присылать вопросы по одному с таймером.")
+    try:
+        await bot.send_message(chat_id, hint, parse_mode="HTML")
+    except Exception:
+        pass
 
 
 @router.callback_query(F.data.startswith("test:"))
