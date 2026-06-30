@@ -26,9 +26,13 @@ _processing: dict = {}
 
 
 def _get_session(user_tg_id: int):
-    return db.fetchone(
-        "SELECT * FROM mode_sessions WHERE user_tg_id=? AND mode='learning' "
-        "AND status='active' ORDER BY id DESC LIMIT 1", (user_tg_id,))
+    try:
+        return db.fetchone(
+            "SELECT * FROM mode_sessions WHERE user_tg_id=? AND mode='learning' "
+            "AND status='active' ORDER BY id DESC LIMIT 1", (user_tg_id,))
+    except Exception:
+        # Таблица ещё не создана (старая БД) — режим просто не активен
+        return None
 
 
 def _question_by_id(qid: int):
