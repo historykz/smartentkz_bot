@@ -23,9 +23,20 @@ import database
 from middlewares import UserContextMiddleware, AntiSpamMiddleware
 from handlers import (common, profile, user, quiz, duel,
                        homework, rating, inline, admin, group_quiz,
-                       private_access, categories, question_editor, autopub,
+                       private_access, categories, autopub,
                        appeals, profile_subjects, moderation, daily, notes,
-                       backup, zip_import, payments, announce)
+                       backup, zip_import, payments, announce,
+                       modes, flashcards, learning, modes_admin)
+
+# question_editor импортируем отдельно с защитой — если файл вдруг
+# не доехал на хостинг, бот всё равно стартует (без редактора вопросов).
+try:
+    from handlers import question_editor
+except ImportError as _qe_err:
+    import logging as _lg
+    _lg.getLogger(__name__).error(
+        "question_editor не загружен: %s — бот запустится без него", _qe_err)
+    question_editor = None
 
 
 def setup_logging() -> None:
@@ -85,9 +96,8 @@ async def main() -> None:
     # Предупреждение если БД лежит в репозитории (не Volume)
     if not config.DB_PATH.startswith("/data") and not config.DB_PATH.startswith("/mnt"):
         log.warning(
-            "⚠️ DB_PATH=%s — БД лежит в репозитории и БУДЕТ СТЕРТА при следующем деплое! "
-            "Создай Volume на Railway (Settings → Volumes), смонтируй на /data, "
-            "и поставь переменную DB_PATH=/data/bot.db",
+            "⚠️ DB_PATH=%s — БД лежит в репозитории и БУДЕТ СТЕРТА при деплое! "
+            "Создай Volume на Railway, смонтируй на /data, DB_PATH=/data/bot.db",
             config.DB_PATH)
     log.info("База данных инициализирована: %s", config.DB_PATH)
 
@@ -173,6 +183,10 @@ async def main() -> None:
     dp.include_router(common.router)
     dp.include_router(payments.router)  # платежи Stars — рано
     dp.include_router(announce.router)
+    dp.include_router(modes.router)       # меню режимов
+    dp.include_router(flashcards.router)  # карточки
+    dp.include_router(learning.router)    # заучивание (ловит текст)
+    dp.include_router(modes_admin.router) # админка режимов + история
     dp.include_router(appeals.router)
     dp.include_router(profile_subjects.router)
     dp.include_router(moderation.router)  # команды бан/мут — до group_quiz catch-all
@@ -188,7 +202,8 @@ async def main() -> None:
     dp.include_router(group_quiz.router)
     dp.include_router(private_access.router)
     dp.include_router(categories.router)
-    dp.include_router(question_editor.router)
+    if question_editor is not None:
+        dp.include_router(question_editor.router)
     dp.include_router(autopub.router)
     dp.include_router(backup.router)
     dp.include_router(zip_import.router)
