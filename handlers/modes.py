@@ -25,6 +25,8 @@ log = logging.getLogger(__name__)
 
 MODE_NAMES = {'flashcards': '🃏 Карточки', 'learning': '🧠 Заучивание'}
 MODE_SHORT = {'fc': 'flashcards', 'ln': 'learning'}
+# Обратный маппинг: полное имя → короткий код для callback
+MODE_CODE = {'flashcards': 'fc', 'learning': 'ln'}
 
 
 def _pl(**kw):
@@ -88,9 +90,9 @@ async def _enter_mode(call: CallbackQuery, bot: Bot, mode: str):
         idx = sess['current_index']
         qids = json.loads(sess['question_ids'])
         kb = InlineKeyboardBuilder()
-        kb.button(text="▶️ Продолжить", callback_data=f"mresume:{mode[:2]}:{test_id}")
-        kb.button(text="🔄 Начать заново", callback_data=f"mrestart:{mode[:2]}:{test_id}")
-        kb.button(text="❌ Завершить сессию", callback_data=f"mclose:{mode[:2]}:{test_id}")
+        kb.button(text="▶️ Продолжить", callback_data=f"mresume:{MODE_CODE[mode]}:{test_id}")
+        kb.button(text="🔄 Начать заново", callback_data=f"mrestart:{MODE_CODE[mode]}:{test_id}")
+        kb.button(text="❌ Завершить сессию", callback_data=f"mclose:{MODE_CODE[mode]}:{test_id}")
         kb.adjust(1)
         await bot.send_message(
             call.message.chat.id,
@@ -116,8 +118,8 @@ async def _enter_mode(call: CallbackQuery, bot: Bot, mode: str):
 
 async def _show_start_or_buy(bot, chat_id, user_tg_id, test_id, mode, remaining):
     kb = InlineKeyboardBuilder()
-    kb.button(text="▶️ Начать", callback_data=f"mstart:{mode[:2]}:{test_id}")
-    kb.button(text="➕ Купить ещё", callback_data=f"mbuy:{mode[:2]}:{test_id}")
+    kb.button(text="▶️ Начать", callback_data=f"mstart:{MODE_CODE[mode]}:{test_id}")
+    kb.button(text="➕ Купить ещё", callback_data=f"mbuy:{MODE_CODE[mode]}:{test_id}")
     kb.button(text="🔙 Назад", callback_data=f"opentest:{test_id}")
     kb.adjust(1)
     await bot.send_message(
@@ -131,8 +133,8 @@ async def _show_buy(bot, chat_id, test_id, mode, remaining):
     p10 = ms.price_for(test_id, mode, '10')
     predo = ms.price_for(test_id, mode, 'redo')
     kb = InlineKeyboardBuilder()
-    kb.button(text=f"1 раз — {p1} ⭐️", callback_data=f"mpay:{mode[:2]}:{test_id}:1")
-    kb.button(text=f"10 раз — {p10} ⭐️", callback_data=f"mpay:{mode[:2]}:{test_id}:10")
+    kb.button(text=f"1 раз — {p1} ⭐️", callback_data=f"mpay:{MODE_CODE[mode]}:{test_id}:1")
+    kb.button(text=f"10 раз — {p10} ⭐️", callback_data=f"mpay:{MODE_CODE[mode]}:{test_id}:10")
     kb.button(text="🔙 Назад", callback_data=f"opentest:{test_id}")
     kb.adjust(1)
     test = db.fetchone("SELECT title FROM tests WHERE id=?", (test_id,))
@@ -305,7 +307,7 @@ async def _redo_invoice(call, bot, test_id, mode):
             chat_id=call.message.chat.id,
             title=f"Повтор ошибок ({MODE_NAMES[mode]})"[:32],
             description=f"Повторить {len(err_ids)} вопросов с ошибками",
-            payload=_pl(k="moderedo", t=test_id, m=mode[:2]),
+            payload=_pl(k="moderedo", t=test_id, m=MODE_CODE[mode]),
             currency="XTR",
             prices=[LabeledPrice(label="Повтор ошибок", amount=price)])
     except Exception as e:
