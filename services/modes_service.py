@@ -22,12 +22,19 @@ DEFAULTS = {
 
 def get_modes(test_id: int) -> dict:
     """Настройки режимов теста (создаёт дефолтные если нет)."""
-    row = db.fetchone("SELECT * FROM test_modes WHERE test_id=?", (test_id,))
-    if not row:
-        db.execute("INSERT OR IGNORE INTO test_modes (test_id) VALUES (?)",
-                    (test_id,))
+    try:
         row = db.fetchone("SELECT * FROM test_modes WHERE test_id=?", (test_id,))
-    return row
+        if not row:
+            db.execute("INSERT OR IGNORE INTO test_modes (test_id) VALUES (?)",
+                        (test_id,))
+            row = db.fetchone("SELECT * FROM test_modes WHERE test_id=?", (test_id,))
+        return row
+    except Exception:
+        # Таблица ещё не создана — вернём дефолты
+        return {'test_id': test_id, 'flashcards_enabled': 1,
+                'learning_enabled': 1, 'is_free': 0,
+                'fc_price_1': 5, 'fc_price_10': 10, 'fc_price_redo': 2,
+                'ln_price_1': 5, 'ln_price_10': 10, 'ln_price_redo': 2}
 
 
 def set_mode_enabled(test_id: int, mode: str, enabled: bool):
