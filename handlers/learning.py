@@ -128,8 +128,19 @@ async def _render_question(bot: Bot, chat_id: int, sess, new: bool = False):
 
 
 @router.message(F.text & ~F.text.startswith("/"))
-async def on_text_answer(message: Message, bot: Bot):
+async def on_text_answer(message: Message, bot: Bot, state=None):
     """Приём текстового ответа в режиме заучивания."""
+    # КРИТИЧНО: если у юзера активное FSM-состояние (создаёт тест, вводит
+    # цену и т.д.) — НЕ перехватываем, пропускаем дальше другим хендлерам.
+    try:
+        from aiogram.fsm.context import FSMContext
+        if state is not None:
+            cur_state = await state.get_state()
+            if cur_state is not None:
+                return  # юзер что-то заполняет — не наш случай
+    except Exception:
+        pass
+
     sess = _get_session(message.from_user.id)
     if not sess:
         return  # не наш режим — пропускаем дальше
