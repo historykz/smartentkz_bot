@@ -174,6 +174,13 @@ async def cmd_start_deep(message: Message, command: CommandObject, state: FSMCon
 @router.message(CommandStart(), F.chat.type == "private")
 async def cmd_start(message: Message, state: FSMContext, user: dict):
     await state.clear()
+    # Закрыть незавершённые сессии режимов
+    try:
+        from handlers import flashcards as _fc, learning as _ln
+        _fc.close_user_sessions(message.from_user.id)
+        _ln.close_user_sessions(message.from_user.id)
+    except Exception:
+        pass
     lang = _resolve_lang(user)
     # В группах не показываем главное меню
     if message.chat.type in ("group", "supergroup"):
@@ -452,3 +459,4 @@ async def cb_invite(call: CallbackQuery, user: dict):
             reply_markup=main_menu_kb(lang, utils.is_admin(call.from_user.id)),
             disable_web_page_preview=True)
     await call.answer()
+
