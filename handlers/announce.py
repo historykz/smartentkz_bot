@@ -134,6 +134,7 @@ async def _broadcast_new_test(bot: Bot, test: dict, targets: list,
     is_paid = bool(test.get('is_paid'))
     stars = test.get('price_stars') or 0
     tenge = test.get('price') or 0
+    time_per_q = test.get('time_per_question') or 30
 
     bot_un = getattr(config, 'BOT_USERNAME', '') or ''
     if not bot_un:
@@ -156,13 +157,13 @@ async def _broadcast_new_test(bot: Bot, test: dict, targets: list,
             if lang == 'kz':
                 text = (f"🆕 <b>{cat_name} бойынша жаңа тест шықты!</b>\n\n"
                         f"💎 «{title}»\n"
-                        f"📚 {qcount} сұрақ\n"
+                        f"📚 {qcount} сұрақ  ·  ⏱ әр сұраққа {time_per_q} сек\n"
                         f"💰 Бағасы: {price_str}\n\n"
                         f"Міндетті түрде өтіп көр! 🔥")
             else:
                 text = (f"🆕 <b>Вышел новый тест по {cat_name}!</b>\n\n"
                         f"💎 «{title}»\n"
-                        f"📚 {qcount} вопросов\n"
+                        f"📚 {qcount} вопросов  ·  ⏱ {time_per_q} сек на вопрос\n"
                         f"💰 Цена: {price_str}\n\n"
                         f"Пройди обязательно! 🔥")
             rows = []
@@ -181,12 +182,14 @@ async def _broadcast_new_test(bot: Bot, test: dict, targets: list,
             if lang == 'kz':
                 text = (f"🆕 <b>{cat_name} бойынша жаңа тест шықты!</b>\n\n"
                         f"«{title}»\n"
-                        f"📚 {qcount} сұрақ\n\n"
+                        f"📚 {qcount} сұрақ  ·  ⏱ әр сұраққа {time_per_q} сек\n"
+                        f"🆓 Тегін\n\n"
                         f"Міндетті түрде өтіп көр! 💪")
             else:
                 text = (f"🆕 <b>Вышел новый тест по {cat_name}!</b>\n\n"
                         f"«{title}»\n"
-                        f"📚 {qcount} вопросов\n\n"
+                        f"📚 {qcount} вопросов  ·  ⏱ {time_per_q} сек на вопрос\n"
+                        f"🆓 Бесплатно\n\n"
                         f"Пройди обязательно! 💪")
             kb = InlineKeyboardMarkup(inline_keyboard=[[
                 InlineKeyboardButton(text="🚀 Пройти тест", url=pass_url)]])
