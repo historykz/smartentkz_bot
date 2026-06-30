@@ -48,9 +48,12 @@ def _kb_back_side() -> InlineKeyboardMarkup:
 
 
 def _get_session(user_tg_id: int):
-    return db.fetchone(
-        "SELECT * FROM mode_sessions WHERE user_tg_id=? AND mode='flashcards' "
-        "AND status='active' ORDER BY id DESC LIMIT 1", (user_tg_id,))
+    try:
+        return db.fetchone(
+            "SELECT * FROM mode_sessions WHERE user_tg_id=? AND mode='flashcards' "
+            "AND status='active' ORDER BY id DESC LIMIT 1", (user_tg_id,))
+    except Exception:
+        return None
 
 
 def _question_by_id(qid: int):
