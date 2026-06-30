@@ -183,10 +183,7 @@ async def main() -> None:
     dp.include_router(common.router)
     dp.include_router(payments.router)  # платежи Stars — рано
     dp.include_router(announce.router)
-    dp.include_router(modes.router)       # меню режимов
-    dp.include_router(flashcards.router)  # карточки
-    dp.include_router(learning.router)    # заучивание (ловит текст)
-    dp.include_router(modes_admin.router) # админка режимов + история
+    dp.include_router(modes_admin.router) # админка режимов (callback, не текст)
     dp.include_router(appeals.router)
     dp.include_router(profile_subjects.router)
     dp.include_router(moderation.router)  # команды бан/мут — до group_quiz catch-all
@@ -208,6 +205,12 @@ async def main() -> None:
     dp.include_router(backup.router)
     dp.include_router(zip_import.router)
     dp.include_router(admin.router)
+    # Режимы — В САМОМ КОНЦЕ. learning ловит любой текст, поэтому идёт
+    # после ВСЕХ FSM-хендлеров (создание теста, цены и т.д.), чтобы не
+    # перехватывать ввод. modes (callback-кнопки) и flashcards — тоже тут.
+    dp.include_router(modes.router)       # меню режимов (callback)
+    dp.include_router(flashcards.router)  # карточки (callback)
+    dp.include_router(learning.router)    # заучивание — ПОСЛЕДНИЙ (ловит текст)
 
     await set_default_commands(bot)
 
