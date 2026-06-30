@@ -129,16 +129,39 @@ async def _show_start_or_buy(bot, chat_id, user_tg_id, test_id, mode, remaining)
 async def _show_buy(bot, chat_id, test_id, mode, remaining):
     p1 = ms.price_for(test_id, mode, '1')
     p10 = ms.price_for(test_id, mode, '10')
+    predo = ms.price_for(test_id, mode, 'redo')
     kb = InlineKeyboardBuilder()
     kb.button(text=f"1 раз — {p1} ⭐️", callback_data=f"mpay:{mode[:2]}:{test_id}:1")
     kb.button(text=f"10 раз — {p10} ⭐️", callback_data=f"mpay:{mode[:2]}:{test_id}:10")
     kb.button(text="🔙 Назад", callback_data=f"opentest:{test_id}")
     kb.adjust(1)
     test = db.fetchone("SELECT title FROM tests WHERE id=?", (test_id,))
+    # Подробное объяснение как пользоваться
+    if mode == 'flashcards':
+        how = (
+            "🃏 <b>Как работают Карточки:</b>\n"
+            "• Видишь вопрос → жмёшь «🔄 Повернуть» → видишь ответ\n"
+            "• Отмечаешь «✅ Знаю» или «❌ Не знаю»\n"
+            "• В конце можно повторить незнакомые\n"
+            "• Удобно для быстрого запоминания (как Quizlet)")
+    else:
+        how = (
+            "🧠 <b>Как работает Заучивание:</b>\n"
+            "• Видишь вопрос → <b>пишешь ответ текстом</b>\n"
+            "• Бот проверяет (регистр и мелкие опечатки не важны)\n"
+            "• Не знаешь — жми «💡 Показать ответ» или «⏭ Пропустить»\n"
+            "• В конце — статистика и повтор ошибок")
     await bot.send_message(
         chat_id,
         f"{MODE_NAMES[mode]}\n«{utils.escape_html(test['title'] if test else '')}»\n\n"
-        f"Выбери доступ:\nОсталось прохождений: {remaining}",
+        f"{how}\n\n"
+        f"💰 <b>Цены:</b>\n"
+        f"• 1 прохождение — {p1} ⭐️\n"
+        f"• 10 прохождений — {p10} ⭐️ (выгоднее!)\n"
+        f"• Повтор ошибок — {predo} ⭐️\n\n"
+        f"<i>Прохождение — это один полный проход теста в этом режиме. "
+        f"Списывается когда начинаешь. Повтор ошибок не тратит прохождение.</i>\n\n"
+        f"Осталось прохождений: {remaining}",
         reply_markup=kb.as_markup(), parse_mode="HTML")
 
 
