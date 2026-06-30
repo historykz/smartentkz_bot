@@ -66,6 +66,9 @@ def profile_kb(lang: str) -> InlineKeyboardMarkup:
         text=("🛒 Менің сатып алуларым" if lang == "kz" else "🛒 Мои покупки"),
         callback_data="profile:purchases")
     kb.button(
+        text=("📊 Менің нәтижелерім" if lang == "kz" else "📊 Мои результаты"),
+        callback_data="myresults")
+    kb.button(
         text=("🎓 Бейіндік пәндерді ауыстыру" if lang == "kz"
               else "🎓 Сменить профильные предметы"),
         callback_data="m:change_subjects")
@@ -102,6 +105,15 @@ def test_card_kb(test_id: int, lang: str, allow_group: bool = True,
     kb = InlineKeyboardBuilder()
     if has_access:
         kb.button(text=t("btn_start_test", lang), callback_data=f"run:{test_id}")
+        # Режимы Карточки/Заучивание (только в личке, проверки внутри)
+        try:
+            from services import modes_service as _ms
+            if _ms.is_mode_enabled(test_id, 'flashcards'):
+                kb.button(text="🃏 Карточки", callback_data=f"mode:fc:{test_id}")
+            if _ms.is_mode_enabled(test_id, 'learning'):
+                kb.button(text="🧠 Заучивание", callback_data=f"mode:ln:{test_id}")
+        except Exception:
+            pass
     if allow_group:
         kb.button(text=t("btn_start_in_group", lang),
                   callback_data=f"share_group:{test_id}")
@@ -396,6 +408,7 @@ def admin_test_actions_kb(test_id: int, lang: str, is_private: bool = False) -> 
     kb.button(text="📦 Экспорт ZIP (с картинками)", callback_data=f"admexport_zip:{test_id}")
     kb.button(text="💎 Платный тест / цены", callback_data=f"admpaid:{test_id}")
     kb.button(text="📢 Анонсировать тест", callback_data=f"admannounce:{test_id}")
+    kb.button(text="🃏🧠 Режимы (Карточки/Заучивание)", callback_data=f"admmodes:{test_id}")
     kb.button(text="➕ Дописать вопросы из .txt", callback_data=f"admappend_star:{test_id}")
     kb.button(text="📤 Экспорт в .txt (со *)", callback_data=f"admexport_star:{test_id}")
     kb.button(text="📤 Экспорт JSON", callback_data=f"admexport_json:{test_id}")
