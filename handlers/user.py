@@ -203,34 +203,98 @@ async def cb_tests_by_category(call: CallbackQuery, user: dict):
 
 @router.callback_query(F.data == "m:private_tests")
 async def cb_private_tests_list(call: CallbackQuery, user: dict):
-    """Каталог приватных тестов конкретного юзера."""
+    """Каталог приватных тестов конкретного юзера — по разделам."""
     from handlers import private_access as _pa
     lang = _resolve_lang(user)
     private_tests = _pa.list_user_private_tests(call.from_user.id)
 
+    from aiogram.utils.keyboard import InlineKeyboardBuilder
+    from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
+
     if not private_tests:
         text = "🔐 <b>Закрытые тесты</b>\n\n<i>У вас нет доступа к закрытым тестам.</i>"
-        from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
         kb = InlineKeyboardMarkup(inline_keyboard=[[
             InlineKeyboardButton(text="↩️ Назад", callback_data="m:tests")
         ]])
-    else:
-        text = (f"🔐 <b>Ваши закрытые тесты</b>\n\n"
-                f"Доступно: <b>{len(private_tests)}</b>\n"
-                f"Выберите тест для прохождения:")
-        from aiogram.utils.keyboard import InlineKeyboardBuilder
-        kb_builder = InlineKeyboardBuilder()
-        for tst in private_tests[:30]:
-            title = (tst.get('title') or '—')[:50]
-            kb_builder.button(text=f"🔐 {title}", callback_data=f"opentest:{tst['id']}")
-        kb_builder.button(text="↩️ Назад", callback_data="m:tests")
-        kb_builder.adjust(1)
-        kb = kb_builder.as_markup()
+        try:
+            await call.message.edit_text(text, reply_markup=kb, parse_mode="HTML")
+        except Exception:
+            await call.message.answer(text, reply_markup=kb, parse_mode="HTML")
+        await call.answer()
+        return
 
+    # Группируем по разделам
+    from collections import defaultdict
+    by_cat = defaultdict(list)
+    for tst in private_tests:
+        by_cat[tst.get('category_id')].append(tst)
+
+    kb_builder = InlineKeyboardBuilder()
+    # Сначала разделы (по одному тесты внутри)
+    cats = db.fetchall("SELECT * FROM test_categories ORDER BY sort_order, name")
+    cat_by_id = {c['id']: c for c in cats}
+
+    for cat in cats:
+        tests_in = by_cat.get(cat['id'], [])
+        if tests_in:
+            emoji = cat.get('emoji') or '📚'
+            kb_builder.button(
+                text=f"{emoji} {cat['name']} ({len(tests_in)})",
+                callback_data=f"privcat:{cat['id']}")
+    # Тесты без раздела
+    no_cat = by_cat.get(None, [])
+    if no_cat:
+        kb_builder.button(text=f"📭 Без раздела ({len(no_cat)})",
+                          callback_data="privcat:none")
+    kb_builder.button(text="↩️ Назад", callback_data="m:tests")
+    kb_builder.adjust(1)
+
+    text = (f"🔐 <b>Ваши закрытые тесты</b>\n\n"
+            f"Доступно: <b>{len(private_tests)}</b>\n"
+            f"Выберите раздел:")
     try:
-        await call.message.edit_text(text, reply_markup=kb, parse_mode="HTML")
+        await call.message.edit_text(text, reply_markup=kb_builder.as_markup(),
+                                      parse_mode="HTML")
     except Exception:
-        await call.message.answer(text, reply_markup=kb, parse_mode="HTML")
+        await call.message.answer(text, reply_markup=kb_builder.as_markup(),
+                                    parse_mode="HTML")
+    await call.answer()
+
+
+@router.callback_query(F.data.startswith("privcat:"))
+async def cb_private_category(call: CallbackQuery, user: dict):
+    """Приватные тесты внутри выбранного раздела."""
+    from handlers import private_access as _pa
+    from aiogram.utils.keyboard import InlineKeyboardBuilder
+    arg = call.data.split(":")[1]
+    private_tests = _pa.list_user_private_tests(call.from_user.id)
+
+    if arg == "none":
+        tests_in = [t for t in private_tests if t.get('category_id') is None]
+        cat_title = "📭 Без раздела"
+    else:
+        try:
+            cat_id = int(arg)
+        except ValueError:
+            await call.answer()
+            return
+        tests_in = [t for t in private_tests if t.get('category_id') == cat_id]
+        cat = db.fetchone("SELECT * FROM test_categories WHERE id=?", (cat_id,))
+        cat_title = f"{(cat.get('emoji') or '📚') if cat else '📚'} {cat['name'] if cat else ''}"
+
+    kb = InlineKeyboardBuilder()
+    for tst in tests_in[:40]:
+        title = (tst.get('title') or '—')[:50]
+        kb.button(text=f"🔐 {title}", callback_data=f"opentest:{tst['id']}")
+    kb.button(text="↩️ К разделам", callback_data="m:private_tests")
+    kb.adjust(1)
+    text = f"🔐 <b>{cat_title}</b>\n\nТестов: {len(tests_in)}\nВыберите тест:"
+    try:
+        await call.message.edit_text(text, reply_markup=kb.as_markup(),
+                                      parse_mode="HTML")
+    except Exception:
+        await call.message.answer(text, reply_markup=kb.as_markup(),
+                                    parse_mode="HTML")
     await call.answer()
 
 
@@ -633,5 +697,3 @@ async def cb_stats(call: CallbackQuery, user: dict):
         await call.message.answer(text, reply_markup=kb, parse_mode="HTML",
                                     disable_web_page_preview=True)
     await call.answer()
-
-
