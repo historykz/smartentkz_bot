@@ -307,6 +307,10 @@ async def on_payment(message: Message, bot: Bot):
         await asyncio.sleep(1)
         await test_runner.send_current_question(
             bot, new_attempt, message.chat.id)
+    elif kind in ("modepass", "moderedo"):
+        # Платежи режимов Карточки/Заучивание
+        from handlers import modes as _modes
+        await _modes.handle_mode_payment(message, bot, pl, charge, stars)
     else:
         log.warning("unknown payment payload: %s", sp.invoice_payload)
         await message.answer("✅ Оплата получена.")
@@ -622,3 +626,4 @@ async def msg_price_stars(message: Message, state: FSMContext):
         f"✅ <b>Тест теперь платный!</b>\n\n"
         f"💵 {tenge} ₸  ·  ⭐️ {stars} звёзд{note}",
         parse_mode="HTML")
+
