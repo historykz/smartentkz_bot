@@ -850,6 +850,96 @@ def init_db() -> None:
         except Exception:
             pass
 
+        # --- Настройки режимов Карточки/Заучивание для теста ---
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS test_modes (
+                test_id INTEGER PRIMARY KEY,
+                flashcards_enabled INTEGER DEFAULT 1,
+                learning_enabled INTEGER DEFAULT 1,
+                fc_price_1 INTEGER DEFAULT 5,
+                fc_price_10 INTEGER DEFAULT 10,
+                fc_price_redo INTEGER DEFAULT 2,
+                ln_price_1 INTEGER DEFAULT 5,
+                ln_price_10 INTEGER DEFAULT 10,
+                ln_price_redo INTEGER DEFAULT 2,
+                is_free INTEGER DEFAULT 0
+            )
+        """)
+
+        # --- Купленные прохождения режимов ---
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS mode_passes (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_tg_id INTEGER NOT NULL,
+                test_id INTEGER NOT NULL,
+                mode TEXT NOT NULL,          -- flashcards | learning
+                purchased INTEGER DEFAULT 0, -- сколько куплено
+                used INTEGER DEFAULT 0,      -- сколько использовано
+                charge_id TEXT,
+                created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+                UNIQUE(user_tg_id, test_id, mode)
+            )
+        """)
+
+        # --- Активные/незавершённые сессии режимов (переживают рестарт) ---
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS mode_sessions (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_tg_id INTEGER NOT NULL,
+                test_id INTEGER NOT NULL,
+                mode TEXT NOT NULL,          -- flashcards | learning
+                question_ids TEXT,           -- JSON список id вопросов
+                current_index INTEGER DEFAULT 0,
+                statuses TEXT,               -- JSON {qid: status}
+                answers TEXT,                -- JSON {qid: [попытки]} (learning)
+                know_count INTEGER DEFAULT 0,
+                dontknow_count INTEGER DEFAULT 0,
+                correct_first INTEGER DEFAULT 0,
+                correct_retry INTEGER DEFAULT 0,
+                wrong_count INTEGER DEFAULT 0,
+                skipped_count INTEGER DEFAULT 0,
+                main_message_id INTEGER,
+                photo_message_id INTEGER,
+                side TEXT DEFAULT 'question', -- question | answer (flashcards)
+                is_redo INTEGER DEFAULT 0,    -- сессия повтора ошибок (за 2⭐️)
+                pass_charged INTEGER DEFAULT 0, -- списано ли прохождение
+                status TEXT DEFAULT 'active', -- active | finished
+                started_at TEXT DEFAULT CURRENT_TIMESTAMP,
+                last_action_at TEXT DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_modesess_user "
+                    "ON mode_sessions(user_tg_id, status)")
+
+        # --- История завершённых прохождений режимов ---
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS mode_results (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_tg_id INTEGER NOT NULL,
+                test_id INTEGER NOT NULL,
+                mode TEXT NOT NULL,
+                total INTEGER DEFAULT 0,
+                know_count INTEGER DEFAULT 0,
+                dontknow_count INTEGER DEFAULT 0,
+                correct_first INTEGER DEFAULT 0,
+                correct_retry INTEGER DEFAULT 0,
+                wrong_count INTEGER DEFAULT 0,
+                skipped_count INTEGER DEFAULT 0,
+                details TEXT,                -- JSON подробности
+                duration_sec INTEGER DEFAULT 0,
+                is_redo INTEGER DEFAULT 0,
+                created_at TEXT DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_moderes_user "
+                    "ON mode_results(user_tg_id, mode)")
+
+        # --- Доп. допустимые ответы для вопроса (для Заучивания) ---
+        try:
+            cur.execute("ALTER TABLE questions ADD COLUMN accepted_answers TEXT")
+        except Exception:
+            pass
+
         # --- Покупки (звёзды) ---
         cur.execute("""
             CREATE TABLE IF NOT EXISTS purchases (
