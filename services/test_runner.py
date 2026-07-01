@@ -43,6 +43,18 @@ logger = logging.getLogger(__name__)
 
 # Активные таймеры: attempt_id -> asyncio.Task
 _timers: dict[int, asyncio.Task] = {}
+# Блокировки против гонки при быстром нажатии (attempt_id -> Lock)
+_answer_locks: dict[int, asyncio.Lock] = {}
+# Время последнего ответа (attempt_id -> timestamp) для задержки 1 сек
+_last_answer_time: dict[int, float] = {}
+
+
+def _get_answer_lock(attempt_id: int) -> asyncio.Lock:
+    lk = _answer_locks.get(attempt_id)
+    if lk is None:
+        lk = asyncio.Lock()
+        _answer_locks[attempt_id] = lk
+    return lk
 # Активные сообщения с вопросом: attempt_id -> (chat_id, message_id)
 _active_messages: dict[int, tuple[int, int]] = {}
 # Quiz Poll: poll_id -> {attempt_id, question_id, option_order}
@@ -510,7 +522,24 @@ async def process_answer(bot: Bot, attempt_id: int, question_id: int,
     """
     Обрабатывает ответ пользователя.
     Возвращает короткий код: 'ok', 'already', 'invalid', 'old'.
+    Защищён блокировкой от гонки при быстром нажатии + задержка 1 сек.
     """
+    # Блокировка: пока обрабатываем один ответ, второй ждёт
+    lock = _get_answer_lock(attempt_id)
+    async with lock:
+        # Анти-дабл: если ответ был <1 сек назад — игнорируем (защита от зависания)
+        import time as _t
+        now = _t.time()
+        last = _last_answer_time.get(attempt_id, 0)
+        if now - last < 1.0:
+            return "already"
+        _last_answer_time[attempt_id] = now
+        return await _process_answer_inner(bot, attempt_id, question_id,
+                                            option_id, chat_id)
+
+
+async def _process_answer_inner(bot: Bot, attempt_id: int, question_id: int,
+                                 option_id: int, chat_id: int) -> str:
     attempt = get_attempt(attempt_id)
     if not attempt:
         return "old"
@@ -656,6 +685,9 @@ async def finalize_attempt(bot: Bot, attempt_id: int, chat_id: int,
                            aborted: bool = False) -> None:
     """Подсчёт и отправка результатов."""
     cancel_timer(attempt_id)
+    # Чистим блокировки ответов
+    _answer_locks.pop(attempt_id, None)
+    _last_answer_time.pop(attempt_id, None)
     attempt = get_attempt(attempt_id)
     if not attempt:
         return
