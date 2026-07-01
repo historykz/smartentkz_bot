@@ -76,14 +76,6 @@ async def cb_duel_category_chosen(call: CallbackQuery, user: dict):
 
     code = await duel_service.create_invite(
         call.from_user.id, call.message.chat.id, lang, category_id=category_id)
-    import config
-    bot_un = getattr(config, 'BOT_USERNAME', '') or ''
-    if not bot_un:
-        try:
-            bot_un = (await call.bot.get_me()).username
-        except Exception:
-            bot_un = ''
-    link = f"https://t.me/{bot_un}?start=duel_{code}"
 
     # Название раздела
     cat_name = "все разделы"
@@ -92,38 +84,115 @@ async def cb_duel_category_chosen(call: CallbackQuery, user: dict):
         cat_name = c['name'] if c else "раздел"
 
     from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
-    invite_text = (
-        f"⚔️ Я приглашаю тебя на дуэль!\n"
-        f"📚 Раздел: {cat_name}\n"
-        "Заходи, если не струсил 😏"
-    )
-    kb = InlineKeyboardMarkup(inline_keyboard=[[
-        InlineKeyboardButton(text="⚔️ Принять участие", url=link)
-    ]])
+    # Кнопка «Пригласить друга» — открывает выбор чата/друга через инлайн
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(
+            text="👥 Пригласить друга на дуэль",
+            switch_inline_query=f"duel:{code}")],
+        [InlineKeyboardButton(
+            text="❌ Отменить дуэль",
+            callback_data=f"duelcancel:{code}")],
+    ])
     await call.message.answer(
-        "🔗 <b>Готово! Перешли это сообщение другу или в чат:</b>",
-        parse_mode="HTML")
-    await call.message.answer(invite_text, reply_markup=kb)
-    await call.message.answer(
-        "⚠️ Дуэль на 2 человек. Первый кто нажмёт «Принять участие» — "
-        "сыграет с тобой. Жди соперника! ⏳" if lang == "ru"
-        else "⚠️ Дуэль 2 адамға. «Қатысу» басқан бірінші адам сенімен ойнайды. "
-             "Қарсыласты күт! ⏳")
+        f"⚔️ <b>Дуэль создана!</b>\n"
+        f"📚 Раздел: {cat_name}\n\n"
+        f"Нажми кнопку ниже — выбери друга или чат, "
+        f"бот отправит ему вызов со ссылкой.\n\n"
+        f"⏳ Первый кто примет — сыграет с тобой!"
+        if lang == "ru" else
+        f"⚔️ <b>Дуэль құрылды!</b>\n"
+        f"📚 Бөлім: {cat_name}\n\n"
+        f"Төмендегі батырманы бас — досыңды таңда.\n\n"
+        f"⏳ Бірінші қабылдаған сенімен ойнайды!",
+        reply_markup=kb, parse_mode="HTML")
+
+
+@router.callback_query(F.data.startswith("duelcancel:"))
+async def cb_duel_invite_cancel(call: CallbackQuery, user: dict):
+    code = call.data.split(":")[1]
+    duel_service.cleanup_invite(code)
+    await call.answer("Дуэль отменена")
+    try:
+        await call.message.edit_text("❌ Дуэль отменена.")
+    except Exception:
+        pass
 
 
 
-async def cb_duel_fast(call: CallbackQuery, state: FSMContext, user: dict):
+@router.callback_query(F.data == "duel:fast")
+async def cb_duel_fast_menu(call: CallbackQuery, state: FSMContext, user: dict):
+    """Быстрая дуэль — сначала выбор раздела (профильные предметы юзера)."""
     lang = user.get('language') or 'ru'
-    # Проверим, не в активной ли он уже дуэли
+    active = await duel_service.get_active_duel_for(user['id'])
+    if active:
+        await call.answer(t("duel_already_in", lang), show_alert=True)
+        return
+    await call.answer()
+
+    # Профильные предметы юзера
+    profile_ids = []
+    if user.get('profile_subjects'):
+        try:
+            profile_ids = [int(x) for x in str(user['profile_subjects']).split(',') if x.strip()]
+        except Exception:
+            profile_ids = []
+
+    all_cats = duel_service.get_duel_categories(lang)
+    from aiogram.utils.keyboard import InlineKeyboardBuilder
+    kb = InlineKeyboardBuilder()
+
+    # Сначала профильные разделы юзера (если есть вопросы)
+    shown = set()
+    for c in all_cats:
+        if c['id'] in profile_ids:
+            emoji = c.get('emoji') or '📚'
+            kb.button(text=f"{emoji} {c['name']}", callback_data=f"fastcat:{c['id']}")
+            shown.add(c['id'])
+    # Остальные разделы
+    for c in all_cats:
+        if c['id'] not in shown:
+            emoji = c.get('emoji') or '📚'
+            kb.button(text=f"{emoji} {c['name']}", callback_data=f"fastcat:{c['id']}")
+    # Все вместе
+    kb.button(text="🎲 Все разделы (вперемешку)", callback_data="fastcat:all")
+    kb.button(text="↩️ Назад", callback_data="m:duel")
+    kb.adjust(1)
+
+    if not all_cats:
+        await call.message.answer(
+            "⚠️ Пока нет бесплатных тестов для дуэли." if lang == "ru"
+            else "⚠️ Дуэль үшін тегін тесттер жоқ.")
+        return
+
+    await call.message.answer(
+        "⚡️ <b>Быстрая дуэль</b>\n\nПо какому разделу играем?\n"
+        "<i>Бот подберёт соперника, вопросы только из этого раздела.</i>"
+        if lang == "ru" else
+        "⚡️ <b>Жылдам дуэль</b>\n\nҚай бөлім бойынша?",
+        reply_markup=kb.as_markup(), parse_mode="HTML")
+
+
+@router.callback_query(F.data.startswith("fastcat:"))
+async def cb_fast_category(call: CallbackQuery, state: FSMContext, user: dict):
+    """Раздел для быстрой дуэли выбран — ищем пару."""
+    lang = user.get('language') or 'ru'
+    arg = call.data.split(":")[1]
+    category_id = None if arg == "all" else int(arg)
+    await cb_duel_fast(call, state, user, category_id=category_id)
+
+
+async def cb_duel_fast(call: CallbackQuery, state: FSMContext, user: dict,
+                        category_id=None):
+    lang = user.get('language') or 'ru'
     active = await duel_service.get_active_duel_for(user['id'])
     if active:
         await call.answer(t("duel_already_in", lang), show_alert=True)
         return
 
     duel_id = await duel_service.join_queue(call.bot, user['id'],
-                                             call.message.chat.id, lang)
+                                             call.message.chat.id, lang,
+                                             category_id=category_id)
     if duel_id:
-        # Сразу нашли пару
         try:
             await call.message.delete()
         except Exception:
@@ -142,8 +211,8 @@ async def cb_duel_fast(call: CallbackQuery, state: FSMContext, user: dict):
 
 @router.callback_query(F.data == "duel:subject")
 async def cb_duel_subject(call: CallbackQuery, state: FSMContext, user: dict):
-    """Дуэль по предмету — в этой реализации соответствует обычному поиску."""
-    await cb_duel_fast(call, state, user)
+    """Дуэль по предмету = быстрая дуэль с выбором раздела."""
+    await cb_duel_fast_menu(call, state, user)
 
 
 @router.callback_query(F.data == "duel:cancel")
