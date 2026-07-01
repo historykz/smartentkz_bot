@@ -314,9 +314,13 @@ async def cb_confirm(call: CallbackQuery, state: FSMContext, bot: Bot):
         await call.answer("Файл не найден, начни заново.", show_alert=True)
         return
     await call.answer()
-    await call.message.edit_text("♻️ Восстанавливаю… подожди.")
-    # Передаём chat для заливки медиа
+    prog = await call.message.edit_text("♻️ Восстанавливаю… подожди.")
+    # Передаём chat для заливки медиа + сообщение для прогресса
     backup_service.restore_backup._admin_chat = call.message.chat.id
+    try:
+        backup_service.restore_backup._progress_msg_id = prog.message_id
+    except Exception:
+        backup_service.restore_backup._progress_msg_id = call.message.message_id
     try:
         report = await backup_service.restore_backup(bot, path, mode=mode)
     except Exception as e:
