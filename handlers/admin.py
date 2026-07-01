@@ -240,6 +240,15 @@ async def _finish_create_test(bot: Bot, chat_id: int, state: FSMContext, user: d
     await state.clear()
     await bot.send_message(chat_id, t("test_created", lang, id=test_id),
                            reply_markup=admin_test_actions_kb(test_id, lang))
+    # Лог действия админа
+    try:
+        from services import admin_log_service as _als
+        admin_tg = user.get('tg_id') or message.from_user.id
+        await _als.log_action(
+            bot, admin_tg, "Создан тест (черновик)",
+            f"📝 «{data['title']}»\n🆔 ID: {test_id}")
+    except Exception:
+        pass
 
 
 # =================================
@@ -818,21 +827,66 @@ async def msg_import_file(message: Message, state: FSMContext):
 
 
 
+class DeleteTestStates(StatesGroup):
+    waiting_password = State()
+
+
+DELETE_PASSWORD = "qwerty10"
+
+
 @router.callback_query(F.data.startswith("admdel:"), IsAdmin())
-async def cb_admdel(call: CallbackQuery, user: dict):
+async def cb_admdel(call: CallbackQuery, state: FSMContext, user: dict):
     lang = user.get('language') or 'ru'
     try:
         tid = int(call.data.split(":")[1])
     except (ValueError, IndexError):
         await call.answer()
         return
+    test = db.fetchone("SELECT title FROM tests WHERE id=?", (tid,))
+    tname = test['title'] if test else '—'
+    await state.set_state(DeleteTestStates.waiting_password)
+    await state.update_data(del_test_id=tid)
+    await call.message.answer(
+        f"🔒 <b>Удаление теста «{tname}»</b>\n\n"
+        f"Это действие <b>необратимо</b> — тест и все вопросы удалятся навсегда.\n\n"
+        f"Введи пароль для подтверждения удаления:\n\n"
+        f"/cancel — отмена",
+        parse_mode="HTML")
+    await call.answer()
+
+
+@router.message(DeleteTestStates.waiting_password, IsAdmin())
+async def msg_delete_password(message: Message, state: FSMContext, user: dict):
+    lang = user.get('language') or 'ru'
+    if message.text and message.text.startswith('/cancel'):
+        await state.clear()
+        await message.answer("❌ Удаление отменено.")
+        return
+    entered = (message.text or '').strip()
+    data = await state.get_data()
+    tid = data.get('del_test_id')
+    if entered != DELETE_PASSWORD:
+        await message.answer(
+            "❌ Неверный пароль. Тест НЕ удалён.\n"
+            "Попробуй ещё раз или /cancel для отмены.")
+        return
+    await state.clear()
+    if not tid:
+        await message.answer("⚠️ Тест не найден.")
+        return
     db.execute("DELETE FROM question_options WHERE question_id IN "
                 "(SELECT id FROM questions WHERE test_id=?)", (tid,))
     db.execute("DELETE FROM questions WHERE test_id=?", (tid,))
+    # Получаем название до удаления для лога
+    test_del = db.fetchone("SELECT title FROM tests WHERE id=?", (tid,))
+    tname_del = test_del['title'] if test_del else '—'
     db.execute("DELETE FROM tests WHERE id=?", (tid,))
-    await call.answer(t("test_deleted", lang), show_alert=True)
+    await message.answer("🗑 ✅ Тест удалён.")
     try:
-        await call.message.delete()
+        from services import admin_log_service as _als
+        await _als.log_test_deleted(
+            message.bot, user.get('tg_id') or message.from_user.id,
+            tname_del, tid)
     except Exception:
         pass
 
@@ -2293,4 +2347,3 @@ async def cb_admin_fallback(call: CallbackQuery, state: FSMContext, user: dict):
     await call.answer(
         f"⚠️ Эта функция временно недоступна.\nДанные: {call.data}",
         show_alert=False)
-
