@@ -75,6 +75,58 @@ async def _build_share_result(q: str, from_user):
     )]
 
 
+async def _build_duel_invite(q: str, from_user):
+    """
+    Построить inline-результат приглашения на дуэль.
+    q = 'duel:<code>'. Кнопка ведёт друга по deep-link на код дуэли.
+    """
+    import database as db
+    from aiogram.types import (InlineQueryResultArticle,
+                                InputTextMessageContent,
+                                InlineKeyboardMarkup, InlineKeyboardButton)
+    try:
+        code = q.split(":", 1)[1].strip()
+    except Exception:
+        return []
+    if not code:
+        return []
+
+    inv = db.fetchone("SELECT * FROM duel_invites WHERE code=?", (code,))
+    cat_name = "все разделы"
+    if inv and inv.get('category_id'):
+        c = db.fetchone("SELECT name FROM test_categories WHERE id=?",
+                        (inv['category_id'],))
+        if c:
+            cat_name = c['name']
+
+    bot_username = getattr(config, 'BOT_USERNAME', '') or ''
+    if not bot_username:
+        try:
+            me = await from_user.bot.get_me()
+            bot_username = me.username or ''
+        except Exception:
+            pass
+
+    link = f"https://t.me/{bot_username}?start=duel_{code}"
+    inviter = from_user.first_name or from_user.username or "Игрок"
+
+    msg_text = (f"⚔️ <b>{utils.escape_html(inviter)} вызывает на дуэль!</b>\n"
+                f"📚 Раздел: {cat_name}\n\n"
+                f"Кто быстрее и точнее ответит? 😎")
+    kb = InlineKeyboardMarkup(inline_keyboard=[[
+        InlineKeyboardButton(text="⚔️ Принять вызов", url=link)
+    ]])
+
+    return [InlineQueryResultArticle(
+        id=f"duel_{code}",
+        title="⚔️ Пригласить на дуэль",
+        description=f"Раздел: {cat_name} — отправь другу вызов!",
+        input_message_content=InputTextMessageContent(
+            message_text=msg_text, parse_mode="HTML"),
+        reply_markup=kb,
+    )]
+
+
 @router.inline_query()
 async def inline_search(query: InlineQuery):
     """
@@ -98,6 +150,15 @@ async def inline_search(query: InlineQuery):
             await query.answer(results, cache_time=1, is_personal=True)
         except Exception as e:
             log.warning("share inline answer failed: %s", e)
+        return
+
+    # Приглашение на дуэль: duel:<code>
+    if q.lower().startswith("duel:"):
+        results = await _build_duel_invite(q, query.from_user)
+        try:
+            await query.answer(results, cache_time=1, is_personal=True)
+        except Exception as e:
+            log.warning("duel inline answer failed: %s", e)
         return
 
     # Если в запросе есть test:<id> — игнорируем язык
