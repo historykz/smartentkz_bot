@@ -33,6 +33,45 @@ router = Router(name="admin")
 log = logging.getLogger(__name__)
 
 
+@router.message(Command("setlogchat"), IsAdmin())
+async def cmd_set_log_chat(message: Message, user: dict):
+    """Задать текущий чат как чат для логов действий админов."""
+    from services import admin_log_service as _als
+    chat_id = message.chat.id
+    _als.set_log_chat(chat_id)
+    try:
+        await message.answer(
+            f"✅ <b>Этот чат теперь получает логи действий админов.</b>\n"
+            f"🆔 Chat ID: <code>{chat_id}</code>\n\n"
+            f"Сюда будут приходить все действия: создание тестов, "
+            f"добавление вопросов, выдача доступа, удаление.\n\n"
+            f"Проверить — команда /testlog",
+            parse_mode="HTML")
+    except Exception:
+        pass
+
+
+@router.message(Command("testlog"), IsAdmin())
+async def cmd_test_log(message: Message, user: dict):
+    """Проверить работает ли лог-чат — отправить тестовое сообщение."""
+    from services import admin_log_service as _als
+    target = _als._log_chat_id()
+    await message.answer(
+        f"🔍 Текущий чат для логов: <code>{target}</code>\n"
+        f"Отправляю тестовое сообщение туда…", parse_mode="HTML")
+    try:
+        await _als.log_action(
+            message.bot, user.get('tg_id') or message.from_user.id,
+            "🧪 Тест логирования",
+            "Если ты видишь это сообщение в лог-чате — логи работают ✅")
+        await message.answer(
+            "✅ Отправлено. Проверь лог-чат.\n\n"
+            "Если там ничего нет — значит бот не может писать в тот чат "
+            "(не добавлен, не админ, или неверный ID).")
+    except Exception as e:
+        await message.answer(f"⚠️ Ошибка: {e}")
+
+
 @router.message(Command("admin"), IsAdmin())
 async def cmd_admin(message: Message, state: FSMContext, user: dict):
     await state.clear()
@@ -633,6 +672,20 @@ async def msg_append_star(message: Message, state: FSMContext):
                 f"Тест #{test_id} обновлён.")
     await message.answer(msg_text)
     await _show_test_admin_card(message.bot, message.chat.id, test_id)
+    # Лог: вопросы добавлены — теперь тест виден юзерам, отправляем полную инфу
+    try:
+        from services import admin_log_service as _als
+        total_q = db.fetchone(
+            "SELECT COUNT(*) AS c FROM questions WHERE test_id=?", (test_id,))['c']
+        admin_tg = user.get('tg_id') or message.from_user.id
+        await _als.log_action(
+            message.bot, admin_tg, "Добавлены вопросы в тест",
+            f"➕ Добавлено: {added} (всего в тесте: {total_q})\n🆔 Тест ID: {test_id}")
+        # Если это первые вопросы (тест стал видимым) — полный лог + txt
+        if total_q == added:
+            await _als.log_test_created(message.bot, admin_tg, test_id)
+    except Exception:
+        pass
 
 
 # ====== Редактировать название теста ======
