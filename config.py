@@ -86,3 +86,4 @@ INLINE_CACHE_TIME: int = 5
 
 # === Имя бота для deep link (без @). Заполнится автоматически при запуске. ===
 BOT_USERNAME: str = ""
+
