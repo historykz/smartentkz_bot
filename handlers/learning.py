@@ -24,6 +24,13 @@ PROTECT = True
 # Анти-дабл: user_tg_id -> timestamp обработки
 _processing: dict = {}
 
+# Сообщения для удаления при «Продолжить»: sess_id -> [(user_msg_id, bot_msg_id)]
+_cleanup: dict = {}
+
+
+def _remember_cleanup(sess_id: int, user_msg_id: int, bot_msg_id: int):
+    _cleanup.setdefault(sess_id, []).append((user_msg_id, bot_msg_id))
+
 
 def _get_session(user_tg_id: int):
     try:
@@ -168,36 +175,41 @@ async def on_text_answer(message: Message, bot: Bot, state=None):
     statuses = json.loads(sess['statuses'] or '{}')
     attempts = len(answers[qkey])
 
+    # Кнопки после ответа: Продолжить / Завершить
+    def _after_kb(retry=False):
+        rows = [[InlineKeyboardButton(text="➡️ Продолжить", callback_data="ln:cont"),
+                 InlineKeyboardButton(text="🚪 Завершить", callback_data="ln:finish")]]
+        if retry:
+            rows.insert(0, [InlineKeyboardButton(
+                text="🔁 Попробовать ещё раз", callback_data="ln:retry")])
+        return InlineKeyboardMarkup(inline_keyboard=rows)
+
     if result['correct']:
-        # Правильно
         status = 'correct_first' if attempts == 1 else 'correct_retry'
-        # Если ранее показывали ответ — остаётся ошибкой
         if statuses.get(qkey) == 'shown':
             status = 'shown'
         statuses[qkey] = status
         db.execute(
             "UPDATE mode_sessions SET answers=?, statuses=? WHERE id=?",
             (json.dumps(answers), json.dumps(statuses), sess['id']))
-        await message.answer(
+        fb = await message.answer(
             f"✅ <b>Правильно!</b>\nВаш ответ: {utils.escape_html(message.text)}",
-            parse_mode="HTML")
-        # Следующий вопрос
-        db.execute("UPDATE mode_sessions SET current_index=? WHERE id=?",
-                   (idx + 1, sess['id']))
-        import asyncio
-        await asyncio.sleep(0.7)
-        s2 = db.fetchone("SELECT * FROM mode_sessions WHERE id=?", (sess['id'],))
-        await _render_question(bot, message.chat.id, s2)
+            reply_markup=_after_kb(), parse_mode="HTML")
+        # Запоминаем id сообщений для удаления при «Продолжить»
+        db.execute(
+            "UPDATE mode_sessions SET photo_message_id=photo_message_id, "
+            "answers=? WHERE id=?", (json.dumps(answers), sess['id']))
+        _remember_cleanup(sess['id'], message.message_id, fb.message_id)
     elif result['close']:
-        # Похоже — спросить подтверждение
         db.execute("UPDATE mode_sessions SET answers=? WHERE id=?",
                    (json.dumps(answers), sess['id']))
         kb = InlineKeyboardMarkup(inline_keyboard=[[
             InlineKeyboardButton(text="✅ Засчитать", callback_data="ln:accept"),
             InlineKeyboardButton(text="❌ Ошибка", callback_data="ln:reject")]])
-        await message.answer(
+        fb = await message.answer(
             f"🤔 Ответ «{utils.escape_html(message.text)}» очень похож на "
             f"правильный. Засчитать?", reply_markup=kb, parse_mode="HTML")
+        _remember_cleanup(sess['id'], message.message_id, fb.message_id)
     else:
         # Неправильно
         if statuses.get(qkey) != 'shown':
@@ -205,13 +217,11 @@ async def on_text_answer(message: Message, bot: Bot, state=None):
         db.execute(
             "UPDATE mode_sessions SET answers=?, statuses=? WHERE id=?",
             (json.dumps(answers), json.dumps(statuses), sess['id']))
-        kb = InlineKeyboardMarkup(inline_keyboard=[[
-            InlineKeyboardButton(text="➡️ Следующий", callback_data="ln:next"),
-            InlineKeyboardButton(text="🔁 Ещё раз", callback_data="ln:retry")]])
-        await message.answer(
+        fb = await message.answer(
             f"❌ <b>Неправильно</b>\nВаш ответ: {utils.escape_html(message.text)}\n\n"
             f"<b>Правильный ответ:</b>\n{utils.escape_html(result['correct_text'])}",
-            reply_markup=kb, parse_mode="HTML")
+            reply_markup=_after_kb(retry=True), parse_mode="HTML")
+        _remember_cleanup(sess['id'], message.message_id, fb.message_id)
 
 
 @router.callback_query(F.data == "ln:accept")
@@ -264,6 +274,30 @@ async def cb_reject(call: CallbackQuery, bot: Bot):
     except Exception:
         pass
     await call.answer()
+
+
+@router.callback_query(F.data == "ln:cont")
+async def cb_cont(call: CallbackQuery, bot: Bot):
+    """Продолжить: удалить ответ юзера и фидбэк бота, показать следующий вопрос."""
+    sess = _get_session(call.from_user.id)
+    if not sess:
+        await call.answer("Сессия завершена.", show_alert=True)
+        return
+    await call.answer()
+    # Удаляем накопленные сообщения (ответы юзера + фидбэк), чтобы не спамить
+    pairs = _cleanup.pop(sess['id'], [])
+    for user_mid, bot_mid in pairs:
+        for mid in (user_mid, bot_mid):
+            try:
+                await bot.delete_message(call.message.chat.id, mid)
+            except Exception:
+                pass
+    # Переходим к следующему вопросу
+    idx = sess['current_index']
+    db.execute("UPDATE mode_sessions SET current_index=? WHERE id=?",
+               (idx + 1, sess['id']))
+    s2 = db.fetchone("SELECT * FROM mode_sessions WHERE id=?", (sess['id'],))
+    await _render_question(bot, call.message.chat.id, s2, new=True)
 
 
 @router.callback_query(F.data == "ln:next")
@@ -354,6 +388,21 @@ async def cb_finish(call: CallbackQuery, bot: Bot):
 
 async def _finish(bot: Bot, chat_id: int, sess):
     await _delete_photo(bot, sess)
+    # Удаляем главное сообщение вопроса + накопленные ответы (чат чистый)
+    main_id = sess.get('main_message_id')
+    if main_id:
+        try:
+            await bot.delete_message(chat_id, main_id)
+        except Exception:
+            pass
+    # Удаляем оставшиеся сообщения-ответы из cleanup
+    pairs = _cleanup.pop(sess['id'], [])
+    for user_mid, bot_mid in pairs:
+        for mid in (user_mid, bot_mid):
+            try:
+                await bot.delete_message(chat_id, mid)
+            except Exception:
+                pass
     qids = json.loads(sess['question_ids'])
     statuses = json.loads(sess['statuses'] or '{}')
     answers = json.loads(sess['answers'] or '{}')
