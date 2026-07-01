@@ -264,6 +264,13 @@ async def cb_finish(call: CallbackQuery, bot: Bot):
 async def _finish(bot: Bot, chat_id: int, sess):
     """Завершить карточки, показать результат."""
     await _delete_photo(bot, sess)
+    # Удаляем главное сообщение карточки (чат не засоряется)
+    main_id = sess.get('main_message_id')
+    if main_id:
+        try:
+            await bot.delete_message(chat_id, main_id)
+        except Exception:
+            pass
     qids = json.loads(sess['question_ids'])
     statuses = json.loads(sess['statuses'] or '{}')
     know = sum(1 for v in statuses.values() if v == 'know')
