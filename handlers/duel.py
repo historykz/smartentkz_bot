@@ -9,6 +9,7 @@ import utils
 from locales import t
 from keyboards import duel_menu_kb, duel_cancel_kb, back_kb, main_menu_kb
 from states import DuelStates
+import database as db
 from services import duel_service
 
 router = Router(name="duel")
@@ -39,9 +40,42 @@ async def cb_duel_invite(call: CallbackQuery, user: dict):
         await call.answer(t("personal_chat_only", lang), show_alert=True)
         return
     await call.answer()
+    # Сначала выбор раздела
+    cats = duel_service.get_duel_categories(lang)
+    from aiogram.utils.keyboard import InlineKeyboardBuilder
+    kb = InlineKeyboardBuilder()
+    for c in cats:
+        emoji = c.get('emoji') or '📚'
+        kb.button(text=f"{emoji} {c['name']}",
+                  callback_data=f"duelcat:{c['id']}")
+    # Все разделы вместе
+    kb.button(text="🎲 Все разделы (вперемешку)", callback_data="duelcat:all")
+    kb.button(text="↩️ Назад", callback_data="duel:menu")
+    kb.adjust(1)
+    if not cats:
+        await call.message.answer(
+            "⚠️ Пока нет бесплатных тестов для дуэли. Попроси админа добавить."
+            if lang == "ru" else
+            "⚠️ Дуэль үшін тегін тесттер жоқ. Әкімшіден сұра.")
+        return
+    await call.message.answer(
+        "⚔️ <b>Дуэль</b>\n\nПо какому разделу сыграем?\n"
+        "<i>Вопросы будут только из выбранного раздела.</i>"
+        if lang == "ru" else
+        "⚔️ <b>Дуэль</b>\n\nҚай бөлім бойынша ойнаймыз?",
+        reply_markup=kb.as_markup(), parse_mode="HTML")
+
+
+@router.callback_query(F.data.startswith("duelcat:"))
+async def cb_duel_category_chosen(call: CallbackQuery, user: dict):
+    """Раздел выбран — создаём ссылку-приглашение."""
+    lang = user.get('language') or 'ru'
+    arg = call.data.split(":")[1]
+    category_id = None if arg == "all" else int(arg)
+    await call.answer()
+
     code = await duel_service.create_invite(
-        call.from_user.id, call.message.chat.id, lang)
-    # username бота
+        call.from_user.id, call.message.chat.id, lang, category_id=category_id)
     import config
     bot_un = getattr(config, 'BOT_USERNAME', '') or ''
     if not bot_un:
@@ -51,16 +85,21 @@ async def cb_duel_invite(call: CallbackQuery, user: dict):
             bot_un = ''
     link = f"https://t.me/{bot_un}?start=duel_{code}"
 
+    # Название раздела
+    cat_name = "все разделы"
+    if category_id:
+        c = db.fetchone("SELECT name FROM test_categories WHERE id=?", (category_id,))
+        cat_name = c['name'] if c else "раздел"
+
     from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
-    # Сообщение которое юзер перешлёт в чат
     invite_text = (
-        "⚔️ Я приглашаю тебя на дуэль!\n"
+        f"⚔️ Я приглашаю тебя на дуэль!\n"
+        f"📚 Раздел: {cat_name}\n"
         "Заходи, если не струсил 😏"
     )
     kb = InlineKeyboardMarkup(inline_keyboard=[[
         InlineKeyboardButton(text="⚔️ Принять участие", url=link)
     ]])
-    # Отправляем готовое приглашение
     await call.message.answer(
         "🔗 <b>Готово! Перешли это сообщение другу или в чат:</b>",
         parse_mode="HTML")
