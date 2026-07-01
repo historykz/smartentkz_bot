@@ -274,6 +274,7 @@ async def _send_duel_question(bot: Bot, duel_id: int):
     # Фото — отдельным сообщением ПЕРЕД poll (обоим игрокам)
     photo = q.get('photo_file_id') or q.get('image_file_id')
     state['poll_ids'] = {}
+    state.setdefault('poll_msgs', [])  # (chat_id, message_id) для удаления
     for pkey, chat in (('p1', state['chat1']), ('p2', state['chat2'])):
         try:
             if photo:
@@ -297,6 +298,7 @@ async def _send_duel_question(bot: Bot, duel_id: int):
                 reply_markup=end_kb,
             )
             state['poll_ids'][msg.poll.id] = pkey
+            state['poll_msgs'].append((chat, msg.message_id))
             _poll_to_duel[msg.poll.id] = duel_id
         except (TelegramBadRequest, TelegramForbiddenError):
             await _finalize_duel(bot, duel_id, technical=True)
@@ -519,6 +521,12 @@ async def _finalize_duel(bot: Bot, duel_id: int, technical: bool = False,
     for pid in list(_poll_to_duel.keys()):
         if _poll_to_duel.get(pid) == duel_id:
             _poll_to_duel.pop(pid, None)
+    # Удаляем сообщения с вопросами-опросами (чат чистый)
+    for chat, mid in state.get('poll_msgs', []):
+        try:
+            await bot.delete_message(chat, mid)
+        except Exception:
+            pass
 
     s1, s2 = state['score1'], state['score2']
     if s1 > s2:
