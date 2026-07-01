@@ -960,6 +960,26 @@ def init_db() -> None:
         cur.execute("CREATE INDEX IF NOT EXISTS idx_purchases_test "
                     "ON purchases(test_id)")
 
+        # --- Приглашения на дуэль (в БД, чтобы ссылка пережила рестарт) ---
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS duel_invites (
+                code TEXT PRIMARY KEY,
+                host_tg_id INTEGER NOT NULL,
+                host_chat_id INTEGER,
+                host_lang TEXT DEFAULT 'ru',
+                category_id INTEGER,         -- раздел дуэли (NULL = все)
+                guest_tg_id INTEGER,
+                duel_id INTEGER,
+                status TEXT DEFAULT 'waiting', -- waiting | started | expired
+                created_at TEXT DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
+        # Раздел в дуэли
+        try:
+            cur.execute("ALTER TABLE duels ADD COLUMN category_id INTEGER")
+        except Exception:
+            pass
+
         # --- Предупреждения за ссылки ---
         cur.execute("""
             CREATE TABLE IF NOT EXISTS link_warnings (
