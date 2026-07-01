@@ -277,3 +277,26 @@ async def cb_duel_answer(call: CallbackQuery, user: dict):
         await call.answer(t("old_button", lang), show_alert=True)
     else:
         await call.answer(t("error_generic", lang), show_alert=True)
+
+
+# ===================== ЗАВЕРШЕНИЕ ДУЭЛИ (КНОПКА) =====================
+# Обработка ответов через Quiz Poll подключена в handlers/quiz.py::on_poll_answer
+# (централизованно), чтобы не конфликтовать с групповыми тестами.
+
+
+@router.callback_query(F.data.startswith("duelquit:"))
+async def cb_duel_quit(call: CallbackQuery, user: dict):
+    """Завершить дуэль (сдаться)."""
+    lang = user.get('language') or 'ru'
+    try:
+        duel_id = int(call.data.split(":")[1])
+    except (ValueError, IndexError):
+        await call.answer()
+        return
+    ok = await duel_service.quit_duel(call.bot, duel_id, call.from_user.id)
+    if ok:
+        await call.answer("Дуэль завершена." if lang == "ru" else "Дуэль аяқталды.",
+                          show_alert=True)
+    else:
+        await call.answer("Дуэль уже завершена." if lang == "ru"
+                          else "Дуэль аяқталған.", show_alert=True)
