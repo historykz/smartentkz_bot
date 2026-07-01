@@ -27,24 +27,29 @@ _active: dict[int, dict] = {}
 _active_lock = asyncio.Lock()
 
 
-async def join_queue(bot: Bot, user_id: int, chat_id: int, lang: str) -> Optional[int]:
-    """Поставить пользователя в очередь. Возвращает duel_id, если нашли пару, иначе None."""
+async def join_queue(bot: Bot, user_id: int, chat_id: int, lang: str,
+                     category_id=None) -> Optional[int]:
+    """Поставить в очередь. Матчит по языку И разделу. Возвращает duel_id или None."""
     async with _queue_lock:
-        # Ищем противника с ТЕМ ЖЕ языком
         for i, w in enumerate(_queue):
             if w['user_id'] == user_id:
                 return None
             if w.get('lang') != lang:
                 continue
+            # Матчим по разделу: оба должны хотеть один раздел (или оба «все»)
+            if w.get('category_id') != category_id:
+                continue
             opponent = _queue.pop(i)
             duel_id = await _start_duel(bot, opponent['user_id'], opponent['chat_id'],
-                                        opponent['lang'], user_id, chat_id, lang)
+                                        opponent['lang'], user_id, chat_id, lang,
+                                        category_id=category_id)
             return duel_id
-        # Никого нет с таким языком — добавляем
+        # Никого подходящего — добавляем себя
         _queue.append({
             'user_id': user_id,
             'chat_id': chat_id,
             'lang': lang,
+            'category_id': category_id,
             'joined_at': time.time(),
         })
     return None
