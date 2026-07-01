@@ -559,25 +559,40 @@ async def restore_backup(bot, zip_path, mode: str = "replace") -> dict:
             report["media_failed"] += 1
             report["errors"].append(f"Медиа q{qid_str}: чтение {e}")
 
-    # Реальная заливка фото (нужен chat_id админа)
+    # Заливка фото: шлём тихо, сразу удаляем, показываем ТОЛЬКО прогресс
     admin_chat = getattr(restore_backup, "_admin_chat", None)
+    progress_msg_id = getattr(restore_backup, "_progress_msg_id", None)
     if admin_chat and media_to_upload:
         from aiogram.types import BufferedInputFile
+        total_media = len(media_to_upload)
+        done = 0
         for target_qid, content in media_to_upload:
             try:
                 photo = BufferedInputFile(content, filename=f"q_{target_qid}.jpg")
-                msg = await bot.send_photo(
-                    admin_chat, photo,
-                    caption=f"♻️ Восстановление фото для вопроса #{target_qid}")
+                # Шлём без подписи, чтобы получить file_id
+                msg = await bot.send_photo(admin_chat, photo)
                 new_fid = msg.photo[-1].file_id
                 db.execute("UPDATE questions SET photo_file_id=? WHERE id=?",
                             (new_fid, target_qid))
+                # СРАЗУ удаляем чтобы не спамить чат
+                try:
+                    await bot.delete_message(admin_chat, msg.message_id)
+                except Exception:
+                    pass
                 report["media"] += 1
+                done += 1
+                # Обновляем прогресс каждые 10 фото
+                if progress_msg_id and (done % 10 == 0 or done == total_media):
+                    try:
+                        await bot.edit_message_text(
+                            f"♻️ Восстановление…\n"
+                            f"📷 Загружено фото: {done} из {total_media}",
+                            chat_id=admin_chat, message_id=progress_msg_id)
+                    except Exception:
+                        pass
             except Exception as e:
                 report["media_failed"] += 1
-                report["errors"].append(f"Медиа q{target_qid}: заливка {e}")
     elif media_to_upload:
-        # Нет chat — просто отметим что медиа есть но не залито
         report["media_failed"] += len(media_to_upload)
 
     for z in open_zips:
