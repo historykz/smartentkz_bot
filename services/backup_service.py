@@ -559,39 +559,64 @@ async def restore_backup(bot, zip_path, mode: str = "replace") -> dict:
             report["media_failed"] += 1
             report["errors"].append(f"Медиа q{qid_str}: чтение {e}")
 
-    # Заливка фото: шлём тихо, сразу удаляем, показываем ТОЛЬКО прогресс
+    # Заливка фото: шлём тихо, сразу удаляем, показываем ТОЛЬКО прогресс.
+    # С задержкой между фото чтобы Telegram не блокировал (flood control).
     admin_chat = getattr(restore_backup, "_admin_chat", None)
     progress_msg_id = getattr(restore_backup, "_progress_msg_id", None)
     if admin_chat and media_to_upload:
+        import asyncio as _asyncio
         from aiogram.types import BufferedInputFile
+        from aiogram.exceptions import TelegramRetryAfter
         total_media = len(media_to_upload)
         done = 0
         for target_qid, content in media_to_upload:
-            try:
-                photo = BufferedInputFile(content, filename=f"q_{target_qid}.jpg")
-                # Шлём без подписи, чтобы получить file_id
-                msg = await bot.send_photo(admin_chat, photo)
-                new_fid = msg.photo[-1].file_id
-                db.execute("UPDATE questions SET photo_file_id=? WHERE id=?",
-                            (new_fid, target_qid))
-                # СРАЗУ удаляем чтобы не спамить чат
+            # До 3 попыток на каждое фото (на случай flood control)
+            for attempt in range(5):
                 try:
-                    await bot.delete_message(admin_chat, msg.message_id)
-                except Exception:
-                    pass
-                report["media"] += 1
-                done += 1
-                # Обновляем прогресс каждые 10 фото
-                if progress_msg_id and (done % 10 == 0 or done == total_media):
+                    photo = BufferedInputFile(content, filename=f"q_{target_qid}.jpg")
+                    msg = await bot.send_photo(admin_chat, photo)
+                    new_fid = msg.photo[-1].file_id
+                    db.execute("UPDATE questions SET photo_file_id=? WHERE id=?",
+                                (new_fid, target_qid))
                     try:
-                        await bot.edit_message_text(
-                            f"♻️ Восстановление…\n"
-                            f"📷 Загружено фото: {done} из {total_media}",
-                            chat_id=admin_chat, message_id=progress_msg_id)
+                        await bot.delete_message(admin_chat, msg.message_id)
                     except Exception:
                         pass
-            except Exception as e:
-                report["media_failed"] += 1
+                    report["media"] += 1
+                    done += 1
+                    break  # успех — выходим из retry
+                except TelegramRetryAfter as e:
+                    # Telegram просит подождать N секунд — ждём и повторяем
+                    wait = getattr(e, 'retry_after', 5)
+                    log.warning("restore flood, ждём %s сек", wait)
+                    if progress_msg_id:
+                        try:
+                            await bot.edit_message_text(
+                                f"♻️ Восстановление…\n"
+                                f"📷 Загружено: {done} из {total_media}\n"
+                                f"⏳ Telegram просит паузу {wait} сек…",
+                                chat_id=admin_chat, message_id=progress_msg_id)
+                        except Exception:
+                            pass
+                    await _asyncio.sleep(wait + 1)
+                except Exception as e:
+                    # Сетевая ошибка/таймаут — подождём и попробуем ещё
+                    if attempt < 4:
+                        await _asyncio.sleep(2)
+                        continue
+                    report["media_failed"] += 1
+                    break  # после 5 попыток — пропускаем это фото
+            # Задержка между фото (защита от flood): ~0.3 сек
+            await _asyncio.sleep(0.35)
+            # Обновляем прогресс каждые 10 фото
+            if progress_msg_id and (done % 10 == 0 or done == total_media):
+                try:
+                    await bot.edit_message_text(
+                        f"♻️ Восстановление…\n"
+                        f"📷 Загружено фото: {done} из {total_media}",
+                        chat_id=admin_chat, message_id=progress_msg_id)
+                except Exception:
+                    pass
     elif media_to_upload:
         report["media_failed"] += len(media_to_upload)
 
