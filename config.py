@@ -32,6 +32,10 @@ ADMIN_IDS: list[int] = list(dict.fromkeys(_HARDCODED_ADMIN_IDS + _env_admin_ids)
 # Username менеджера (без @) для платных тестов и поддержки
 MANAGER_USERNAME: str = os.getenv("MANAGER_USERNAME", "historyentk_bot")
 
+# Чат для логов действий админов (ID чата/канала, например -1001234567890).
+# Если пусто — логи шлются главному админу в личку.
+ADMIN_LOG_CHAT: str = os.getenv("ADMIN_LOG_CHAT", "").strip()
+
 # Канал обязательной подписки (с @ или без; пустая строка = выключено).
 # По умолчанию — @historykazakhkz. Можно переопределить через Railway Variables.
 REQUIRED_CHANNEL: str = os.getenv("REQUIRED_CHANNEL", "@ent_biologydariga").strip()
