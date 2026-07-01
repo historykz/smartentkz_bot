@@ -544,11 +544,21 @@ async def _finalize_group(bot: Bot, gqid: int, chat_id: int):
 
 @router.poll_answer()
 async def on_poll_answer(poll_answer: PollAnswer):
-    """Ответ из Quiz Poll — личный, групповой тест или смена правильного ответа админом."""
+    """Ответ из Quiz Poll — личный, групповой тест, дуэль или смена правильного ответа админом."""
     try:
         bot = poll_answer.bot
         if bot is None:
             return
+        # Дуэль (Quiz Poll)
+        try:
+            from services import duel_service as _ds
+            if poll_answer.poll_id in _ds._poll_to_duel:
+                await _ds.handle_poll_answer(
+                    bot, poll_answer.poll_id,
+                    poll_answer.user.id, poll_answer.option_ids)
+                return
+        except Exception as e:
+            log.warning("duel poll route: %s", e)
         # Админский poll смены правильного ответа (question_editor)
         try:
             from handlers.question_editor import _correct_poll_map
