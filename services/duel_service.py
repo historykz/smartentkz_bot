@@ -70,94 +70,105 @@ def _gen_code() -> str:
     return secrets.token_hex(4)  # 8 символов
 
 
-async def create_invite(user_tg_id: int, chat_id: int, lang: str) -> str:
-    """Создать комнату-приглашение. user_tg_id — telegram id. Возвращает код."""
-    # Конвертируем tg_id → внутренний id
-    u = utils.get_user_by_tg(user_tg_id)
-    internal_id = u['id'] if u else None
-    async with _invite_lock:
-        for code in list(_invite_rooms.keys()):
-            if _invite_rooms[code]['host_tg'] == user_tg_id and not _invite_rooms[code].get('duel_id'):
-                _invite_rooms.pop(code, None)
-        code = _gen_code()
-        _invite_rooms[code] = {
-            'host': internal_id,
-            'host_tg': user_tg_id,
-            'host_chat': chat_id,
-            'lang': lang,
-            'created': time.time(),
-            'duel_id': None,
-            'guest': None,
-        }
+async def create_invite(user_tg_id: int, chat_id: int, lang: str,
+                         category_id=None) -> str:
+    """Создать приглашение в БД (переживает рестарт). Возвращает код."""
+    # Удаляем старые незавершённые приглашения этого хоста
+    db.execute(
+        "DELETE FROM duel_invites WHERE host_tg_id=? AND status='waiting'",
+        (user_tg_id,))
+    code = _gen_code()
+    db.execute(
+        """INSERT INTO duel_invites
+           (code, host_tg_id, host_chat_id, host_lang, category_id, status)
+           VALUES (?,?,?,?,?, 'waiting')""",
+        (code, user_tg_id, chat_id, lang, category_id))
     return code
 
 
 async def join_invite(bot: Bot, code: str, user_tg_id: int, chat_id: int,
                        lang: str) -> str:
     """
-    Присоединиться по коду. user_tg_id — telegram id.
-    Статусы: 'started' | 'already_full' | 'not_found' | 'host_waiting'
+    Присоединиться по коду (из БД).
+    Статусы: 'started' | 'already_full' | 'not_found' | 'host_waiting' | 'self'
     """
-    u = utils.get_user_by_tg(user_tg_id)
-    internal_id = u['id'] if u else None
-    async with _invite_lock:
-        room = _invite_rooms.get(code)
-        if not room:
-            return 'not_found'
-        if room['host_tg'] == user_tg_id and not room.get('guest'):
-            return 'host_waiting'
-        if room.get('duel_id') or room.get('guest'):
-            return 'already_full'
-        room['guest'] = internal_id
-        room['guest_tg'] = user_tg_id
-        host_id = room['host']
-        host_chat = room['host_chat']
-        host_lang = room['lang']
-        room['duel_id'] = 'starting'
+    inv = db.fetchone("SELECT * FROM duel_invites WHERE code=?", (code,))
+    if not inv or inv['status'] != 'waiting':
+        return 'not_found'
+    if inv['host_tg_id'] == user_tg_id:
+        return 'host_waiting'
+    if inv.get('guest_tg_id') or inv.get('duel_id'):
+        return 'already_full'
 
-    if not host_id or not internal_id:
+    # Помечаем что гость зашёл
+    db.execute(
+        "UPDATE duel_invites SET guest_tg_id=?, status='started' WHERE code=?",
+        (user_tg_id, code))
+
+    host_u = utils.get_user_by_tg(inv['host_tg_id'])
+    guest_u = utils.get_user_by_tg(user_tg_id)
+    if not host_u or not guest_u:
         return 'not_found'
 
-    duel_id = await _start_duel(bot, host_id, host_chat, host_lang,
-                                 internal_id, chat_id, lang)
-    async with _invite_lock:
-        if code in _invite_rooms:
-            _invite_rooms[code]['duel_id'] = duel_id
+    duel_id = await _start_duel(
+        bot, host_u['id'], inv['host_chat_id'], inv['host_lang'],
+        guest_u['id'], chat_id, lang, category_id=inv.get('category_id'))
+    db.execute("UPDATE duel_invites SET duel_id=? WHERE code=?",
+               (duel_id, code))
     return 'started'
 
 
 def cleanup_invite(code: str):
-    _invite_rooms.pop(code, None)
+    db.execute("DELETE FROM duel_invites WHERE code=?", (code,))
 
 
 
-def _pick_questions(count: int, lang: str = 'ru') -> list[int]:
-    """Случайные вопросы из бесплатных НЕприватных активных тестов на нужном языке."""
-    rows = db.fetchall("""
+def _pick_questions(count: int, lang: str = 'ru', category_id=None) -> list[int]:
+    """
+    Случайные вопросы из бесплатных НЕприватных активных тестов.
+    Если задан category_id — только из тестов этого раздела.
+    """
+    cat_filter = ""
+    params = [lang]
+    if category_id is not None:
+        cat_filter = "AND t.category_id=? "
+        params.append(category_id)
+
+    rows = db.fetchall(f"""
         SELECT q.id FROM questions q
         JOIN tests t ON t.id = q.test_id
         WHERE t.status='active' AND t.is_paid=0
           AND COALESCE(t.is_private,0)=0
-          AND t.allow_duel=1
-          AND t.language=?
-    """, (lang,))
-    if len(rows) < count:
-        rows = db.fetchall("""
-            SELECT q.id FROM questions q
-            JOIN tests t ON t.id = q.test_id
-            WHERE t.status='active' AND t.is_paid=0
-              AND COALESCE(t.is_private,0)=0
-              AND t.language=?
-        """, (lang,))
+          AND t.language=? {cat_filter}
+    """, tuple(params))
     qids = [r['id'] for r in rows]
     if len(qids) < count:
         return qids
     return random.sample(qids, count)
 
 
+def get_duel_categories(lang: str = 'ru') -> list:
+    """Разделы где есть бесплатные доступные вопросы для дуэли."""
+    rows = db.fetchall("""
+        SELECT DISTINCT c.id, c.name, c.emoji,
+               COUNT(q.id) AS qcount
+        FROM test_categories c
+        JOIN tests t ON t.category_id = c.id
+        JOIN questions q ON q.test_id = t.id
+        WHERE t.status='active' AND t.is_paid=0
+          AND COALESCE(t.is_private,0)=0 AND t.language=?
+        GROUP BY c.id, c.name, c.emoji
+        HAVING qcount >= 1
+        ORDER BY c.sort_order, c.name
+    """, (lang,))
+    return [dict(r) for r in rows]
+
+
 async def _start_duel(bot: Bot, uid1: int, chat1: int, lang1: str,
-                      uid2: int, chat2: int, lang2: str) -> Optional[int]:
-    qids = _pick_questions(config.DUEL_QUESTIONS_COUNT, lang1)
+                      uid2: int, chat2: int, lang2: str,
+                      category_id=None) -> Optional[int]:
+    qids = _pick_questions(config.DUEL_QUESTIONS_COUNT, lang1,
+                           category_id=category_id)
     if not qids:
         try:
             await bot.send_message(chat1, t("duel_no_questions", lang1))
@@ -167,9 +178,10 @@ async def _start_duel(bot: Bot, uid1: int, chat1: int, lang1: str,
         return None
 
     db.execute(
-        """INSERT INTO duels (player1_id, player2_id, question_ids, status, created_at)
-           VALUES (?, ?, ?, 'active', ?)""",
-        (uid1, uid2, json.dumps(qids), utils.now_iso())
+        """INSERT INTO duels (player1_id, player2_id, question_ids, status,
+                              category_id, created_at)
+           VALUES (?, ?, ?, 'active', ?, ?)""",
+        (uid1, uid2, json.dumps(qids), category_id, utils.now_iso())
     )
     duel_id = db.fetchone("SELECT last_insert_rowid() AS id")['id']
 
@@ -228,25 +240,28 @@ async def _send_duel_question(bot: Bot, duel_id: int):
         "SELECT time_per_question FROM tests t JOIN questions q ON q.test_id=t.id WHERE q.id=?",
         (qid,))
     time_sec = (test_for_time['time_per_question']
-                if test_for_time else config.DUEL_TIME_PER_QUESTION)
+                if test_for_time and test_for_time.get('time_per_question')
+                else config.DUEL_TIME_PER_QUESTION)
+    # Запоминаем время текущего вопроса для таймаута
+    state['current_time_sec'] = time_sec
     text1 = utils.build_question_text(idx + 1, len(state['questions']),
-                                       q['text'], config.DUEL_TIME_PER_QUESTION,
-                                       state['lang1'])
+                                       q['text'], time_sec, state['lang1'])
     text2 = utils.build_question_text(idx + 1, len(state['questions']),
-                                       q['text'], config.DUEL_TIME_PER_QUESTION,
-                                       state['lang2'])
+                                       q['text'], time_sec, state['lang2'])
 
     state['answered1'] = False
     state['answered2'] = False
     state['current_options'] = options
     state['sent_at'] = time.time()
 
+    # Фото из любого поля (photo_file_id или image_file_id)
+    photo = q.get('photo_file_id') or q.get('image_file_id')
     try:
-        if q['image_file_id']:
-            await bot.send_photo(state['chat1'], q['image_file_id'], caption=text1,
+        if photo:
+            await bot.send_photo(state['chat1'], photo, caption=text1,
                                  reply_markup=duel_options_kb(duel_id, qid, options),
                                  protect_content=config.PROTECT_CONTENT)
-            await bot.send_photo(state['chat2'], q['image_file_id'], caption=text2,
+            await bot.send_photo(state['chat2'], photo, caption=text2,
                                  reply_markup=duel_options_kb(duel_id, qid, options),
                                  protect_content=config.PROTECT_CONTENT)
         else:
@@ -260,18 +275,18 @@ async def _send_duel_question(bot: Bot, duel_id: int):
         await _finalize_duel(bot, duel_id, technical=True)
         return
 
-    # Таймер
+    # Таймер — по времени текущего вопроса (из теста)
     if state.get('task'):
         try:
             state['task'].cancel()
         except Exception:
             pass
-    state['task'] = asyncio.create_task(_duel_timeout(bot, duel_id, idx))
+    state['task'] = asyncio.create_task(_duel_timeout(bot, duel_id, idx, time_sec))
 
 
-async def _duel_timeout(bot: Bot, duel_id: int, idx: int):
+async def _duel_timeout(bot: Bot, duel_id: int, idx: int, time_sec: int = None):
     try:
-        await asyncio.sleep(config.DUEL_TIME_PER_QUESTION)
+        await asyncio.sleep(time_sec or config.DUEL_TIME_PER_QUESTION)
     except asyncio.CancelledError:
         return
     state = _active.get(duel_id)
