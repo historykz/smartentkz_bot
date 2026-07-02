@@ -522,18 +522,20 @@ async def process_answer(bot: Bot, attempt_id: int, question_id: int,
     """
     Обрабатывает ответ пользователя.
     Возвращает короткий код: 'ok', 'already', 'invalid', 'old'.
-    Защищён блокировкой от гонки при быстром нажатии + задержка 1 сек.
+    Защита от гонки: блокировка на время обработки одного ответа.
+    Анти-дабл привязан к КОНКРЕТНОМУ вопросу (не блокирует следующий).
     """
-    # Блокировка: пока обрабатываем один ответ, второй ждёт
     lock = _get_answer_lock(attempt_id)
     async with lock:
-        # Анти-дабл: если ответ был <1 сек назад — игнорируем (защита от зависания)
+        # Анти-дабл только для ПОВТОРНОГО тапа по ТОМУ ЖЕ вопросу.
+        # Ключ — (attempt_id, question_id), чтобы новый вопрос не блокировался.
         import time as _t
         now = _t.time()
-        last = _last_answer_time.get(attempt_id, 0)
-        if now - last < 1.0:
+        key = (attempt_id, question_id)
+        last = _last_answer_time.get(key, 0)
+        if now - last < 0.4:
             return "already"
-        _last_answer_time[attempt_id] = now
+        _last_answer_time[key] = now
         return await _process_answer_inner(bot, attempt_id, question_id,
                                             option_id, chat_id)
 
@@ -685,9 +687,13 @@ async def finalize_attempt(bot: Bot, attempt_id: int, chat_id: int,
                            aborted: bool = False) -> None:
     """Подсчёт и отправка результатов."""
     cancel_timer(attempt_id)
-    # Чистим блокировки ответов
+    # Чистим блокировки ответов (ключи вида (attempt_id, question_id))
     _answer_locks.pop(attempt_id, None)
-    _last_answer_time.pop(attempt_id, None)
+    for k in list(_last_answer_time.keys()):
+        if isinstance(k, tuple) and k[0] == attempt_id:
+            _last_answer_time.pop(k, None)
+        elif k == attempt_id:
+            _last_answer_time.pop(k, None)
     attempt = get_attempt(attempt_id)
     if not attempt:
         return
